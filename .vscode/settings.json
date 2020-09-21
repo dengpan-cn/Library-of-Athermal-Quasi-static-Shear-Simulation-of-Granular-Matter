@@ -1,7 +1,0 @@
-{
-    "files.associations": {
-        "*.cu": "cpp",
-        "*.cuh": "cpp",
-        "firefunc.h": "c"
-    }
-}
