@@ -1,4 +1,4 @@
-# Library of Athermal Quasistatic Simulation FIRE
+# Library of Athermal Quasistatic Simulation
 
 library of AQS using FIRE algorithm for harmonic interaction
 

@@ -1,6 +1,12 @@
 #ifndef __VECTORFUNC__
 #define __VECTORFUNC__
 
+/*
+This library is developed by Deng Pan in Prof. Yuliang Jin's group at ITP,CAS.
+Please contact Prof. Yuliang Jin or Deng Pan (dengpan@mail.itp.ac.cn) for more
+detailed information.
+*/
+
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
