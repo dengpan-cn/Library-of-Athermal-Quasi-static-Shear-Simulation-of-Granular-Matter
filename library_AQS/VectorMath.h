@@ -21,7 +21,7 @@
 #define DIM 3  // dimension of simulation box, currently, it is 3.
 #define PI 3.141592653589793238462643  // pi
 #ifndef VolUnitSphere
-// volume of unit sphere in space with dimension of DIM.
+// volume of unit sphere (radius is 1) in DIM-dimension space.
 #define VolUnitSphere               \
   (pow(PI, ((double)(DIM)) / 2.0) / \
    exp(lgamma(1 + ((double)(DIM)) / 2.0)))  // volume pre-factor for sphere

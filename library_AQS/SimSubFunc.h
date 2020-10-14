@@ -61,8 +61,8 @@ void setBasicInfo(Box *box, Particle *particle, Thermo *thermo, Update *update,
       sqrt(thermo->massUnits / thermo->energyUnits) * thermo->distanceUnits;
   thermo->forceUnits = thermo->energyUnits / thermo->distanceUnits;
   thermo->velocityUnits = sqrt(thermo->energyUnits / thermo->massUnits);
-  thermo->pressureUnits = thermo->energyUnits / pow(thermo->distanceUnits, 3);
-  thermo->volumeUnits = pow(thermo->distanceUnits, 3);
+  thermo->pressureUnits = thermo->energyUnits / pow(thermo->distanceUnits, DIM);
+  thermo->volumeUnits = pow(thermo->distanceUnits, DIM);
 }
 void adjustImg(Box *box, Particle *particle, Thermo *thermo, Update *update,
                Variable *var) {
