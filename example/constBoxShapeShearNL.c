@@ -8,6 +8,8 @@ extern int truncFileFlag;
 
 // compile: gcc -std=gnu99 -lm -O3 constBoxShapeShearNL.c -o cbssnl
 // run: ./cbssnl --rf rf.bin --shear 1E-4 10.0 --dump --cvmin --sf suffix
+// The format of binary file is described in function "read_data" and
+// "write_data"
 void constBoxShapeShearInit(Box *box, Particle *particle, Thermo *thermo,
                             Update *update, Variable *var) {
   if (update->sShear) return;
@@ -25,9 +27,9 @@ void constBoxShapeShearInit(Box *box, Particle *particle, Thermo *thermo,
   if (sShear->maxGamma <= sShear->gamma) Abort("--shear 1E-4 1.0");
 
   char fname[4096];
-  sprintf(fname, "%s/constVolShear_%%13lf_%s.bin", var->cwd, var->sf);
+  sprintf(fname, "%s/constVolShear_%%%dlf_%s.bin", var->cwd,
+          (5 + (DIM * DIM + DIM) / 2), var->sf);
   sShear->shearLog = createReadWriteFile(fname);
-  // initialize contactInfo and dump
   sShear->cinfo = initContactInfo(box, particle, thermo, update, var);
   sShear->dinfo = initDump(box, particle, thermo, update, var);
 
@@ -35,21 +37,24 @@ void constBoxShapeShearInit(Box *box, Particle *particle, Thermo *thermo,
   computeCoordination(box, particle, thermo, update, var);
   dump(box, particle, thermo, update, var);
 
-  double writeInfo[13];
-  writeInfo[0] = sShear->gamma;
-  writeInfo[1] = thermo->volFrac;
-  writeInfo[2] = thermo->Epair / thermo->energyUnits;
-  writeInfo[3] = thermo->ptensor.h0 / thermo->pressureUnits;
-  writeInfo[4] = thermo->ptensor.h1 / thermo->pressureUnits;
-  writeInfo[5] = thermo->ptensor.h2 / thermo->pressureUnits;
-  writeInfo[6] = thermo->ptensor.h3 / thermo->pressureUnits;
-  writeInfo[7] = thermo->ptensor.h4 / thermo->pressureUnits;
-  writeInfo[8] = thermo->ptensor.h5 / thermo->pressureUnits;
-  writeInfo[9] = (double)sShear->cinfo->nRattler / (double)particle->nAtom;
-  writeInfo[10] = sShear->cinfo->aveCoordNum;
-  writeInfo[11] = sShear->cinfo->aveCoordNumExRattler;
-  writeInfo[12] = sShear->cinfo->meanForceExRattler;
-  fwrite(writeInfo, sizeof(double), 13, sShear->shearLog);
+  double writeInfo[5 + (DIM * DIM + DIM) / 2];
+  int wp = 0;
+  writeInfo[wp++] = sShear->gamma;
+  writeInfo[wp++] = thermo->Epair / thermo->energyUnits;
+  for (int idim = 0; idim < DIM; idim++) {
+    writeInfo[wp++] =
+        thermo->ptensor[spaceIdx(idim, idim)] / thermo->pressureUnits;
+  }
+  for (int idim = 0; idim < DIM; idim++) {
+    for (int jdim = idim + 1; jdim < DIM; jdim++) {
+      writeInfo[wp++] =
+          thermo->ptensor[spaceIdx(idim, jdim)] / thermo->pressureUnits;
+    }
+  }
+  writeInfo[wp++] = (double)sShear->cinfo->nRattler / (double)particle->nAtom;
+  writeInfo[wp++] = sShear->cinfo->aveCoordNum;
+  writeInfo[wp++] = sShear->cinfo->aveCoordNumExRattler;
+  fwrite(writeInfo, sizeof(double), wp, sShear->shearLog);
   fflush(sShear->shearLog);
 
   sShear->isInit = true;
@@ -65,7 +70,6 @@ void constBoxShapeShearFinalize(Box *box, Particle *particle, Thermo *thermo,
 }
 void constBoxShapeShear(Box *box, Particle *particle, Thermo *thermo,
                         Update *update, Variable *var) {
-  // initialize
   constBoxShapeShearInit(box, particle, thermo, update, var);
 
   simpleShear *sShear = update->sShear;
@@ -76,33 +80,32 @@ void constBoxShapeShear(Box *box, Particle *particle, Thermo *thermo,
       double strain = pow(10.0, -8.0 + 6.0 / 900.0 * whichStep);
       deltaStrain = strain - sShear->gamma;
     }
-    // shear
     instant_simpShearXz(box, particle, thermo, update, var, deltaStrain);
     sShear->gamma += deltaStrain;
     whichStep++;
 
-    // relaxation
     constBoxShapeFireRelax(box, particle, thermo, update, var);
-
-    // calculate info and dump
     computeCoordination(box, particle, thermo, update, var);
     dump(box, particle, thermo, update, var);
 
-    double writeInfo[13];
-    writeInfo[0] = sShear->gamma;
-    writeInfo[1] = thermo->volFrac;
-    writeInfo[2] = thermo->Epair / thermo->energyUnits;
-    writeInfo[3] = thermo->ptensor.h0 / thermo->pressureUnits;
-    writeInfo[4] = thermo->ptensor.h1 / thermo->pressureUnits;
-    writeInfo[5] = thermo->ptensor.h2 / thermo->pressureUnits;
-    writeInfo[6] = thermo->ptensor.h3 / thermo->pressureUnits;
-    writeInfo[7] = thermo->ptensor.h4 / thermo->pressureUnits;
-    writeInfo[8] = thermo->ptensor.h5 / thermo->pressureUnits;
-    writeInfo[9] = (double)sShear->cinfo->nRattler / (double)particle->nAtom;
-    writeInfo[10] = sShear->cinfo->aveCoordNum;
-    writeInfo[11] = sShear->cinfo->aveCoordNumExRattler;
-    writeInfo[12] = sShear->cinfo->meanForceExRattler;
-    fwrite(writeInfo, sizeof(double), 13, sShear->shearLog);
+    double writeInfo[5 + (DIM * DIM + DIM) / 2];
+    int wp = 0;
+    writeInfo[wp++] = sShear->gamma;
+    writeInfo[wp++] = thermo->Epair / thermo->energyUnits;
+    for (int idim = 0; idim < DIM; idim++) {
+      writeInfo[wp++] =
+          thermo->ptensor[spaceIdx(idim, idim)] / thermo->pressureUnits;
+    }
+    for (int idim = 0; idim < DIM; idim++) {
+      for (int jdim = idim + 1; jdim < DIM; jdim++) {
+        writeInfo[wp++] =
+            thermo->ptensor[spaceIdx(idim, jdim)] / thermo->pressureUnits;
+      }
+    }
+    writeInfo[wp++] = (double)sShear->cinfo->nRattler / (double)particle->nAtom;
+    writeInfo[wp++] = sShear->cinfo->aveCoordNum;
+    writeInfo[wp++] = sShear->cinfo->aveCoordNumExRattler;
+    fwrite(writeInfo, sizeof(double), wp, sShear->shearLog);
     fflush(sShear->shearLog);
   }
 

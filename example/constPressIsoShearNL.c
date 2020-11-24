@@ -8,6 +8,8 @@ extern int truncFileFlag;
 
 // compile: gcc -std=gnu99 -lm -O3 constPressIsoShearNL.c -o cpisnl
 // run: ./cpisnl --rf rf.bin --shear 1E-4 10.0 --dump --cpmin 1E-4 --sf suffix
+// The format of binary file is described in function "read_data" and
+// "write_data"
 void constPressIsoShearInit(Box *box, Particle *particle, Thermo *thermo,
                             Update *update, Variable *var) {
   if (update->sShear) return;
@@ -24,32 +26,12 @@ void constPressIsoShearInit(Box *box, Particle *particle, Thermo *thermo,
   sShear->maxGamma = atof(var->cmd[whichVar].cmdArgv[1]);
   if (sShear->maxGamma <= sShear->gamma) Abort("--shear 1E-4 1.0");
 
-  char fname[4096];
-  sprintf(fname, "%s/constPressShear_%%13lf_%s.bin", var->cwd, var->sf);
-  sShear->shearLog = createReadWriteFile(fname);
   sShear->cinfo = initContactInfo(box, particle, thermo, update, var);
   sShear->dinfo = initDump(box, particle, thermo, update, var);
 
   constPressIsoFireRelax(box, particle, thermo, update, var);
   computeCoordination(box, particle, thermo, update, var);
   dump(box, particle, thermo, update, var);
-
-  double writeInfo[13];
-  writeInfo[0] = sShear->gamma;
-  writeInfo[1] = thermo->volFrac;
-  writeInfo[2] = thermo->Epair / thermo->energyUnits;
-  writeInfo[3] = thermo->ptensor.h0 / thermo->pressureUnits;
-  writeInfo[4] = thermo->ptensor.h1 / thermo->pressureUnits;
-  writeInfo[5] = thermo->ptensor.h2 / thermo->pressureUnits;
-  writeInfo[6] = thermo->ptensor.h3 / thermo->pressureUnits;
-  writeInfo[7] = thermo->ptensor.h4 / thermo->pressureUnits;
-  writeInfo[8] = thermo->ptensor.h5 / thermo->pressureUnits;
-  writeInfo[9] = (double)sShear->cinfo->nRattler / (double)particle->nAtom;
-  writeInfo[10] = sShear->cinfo->aveCoordNum;
-  writeInfo[11] = sShear->cinfo->aveCoordNumExRattler;
-  writeInfo[12] = sShear->cinfo->meanForceExRattler;
-  fwrite(writeInfo, sizeof(double), 13, sShear->shearLog);
-  fflush(sShear->shearLog);
 
   sShear->isInit = true;
 }
@@ -81,23 +63,6 @@ void constPressIsoShear(Box *box, Particle *particle, Thermo *thermo,
     constPressIsoFireRelax(box, particle, thermo, update, var);
     computeCoordination(box, particle, thermo, update, var);
     dump(box, particle, thermo, update, var);
-
-    double writeInfo[13];
-    writeInfo[0] = sShear->gamma;
-    writeInfo[1] = thermo->volFrac;
-    writeInfo[2] = thermo->Epair / thermo->energyUnits;
-    writeInfo[3] = thermo->ptensor.h0 / thermo->pressureUnits;
-    writeInfo[4] = thermo->ptensor.h1 / thermo->pressureUnits;
-    writeInfo[5] = thermo->ptensor.h2 / thermo->pressureUnits;
-    writeInfo[6] = thermo->ptensor.h3 / thermo->pressureUnits;
-    writeInfo[7] = thermo->ptensor.h4 / thermo->pressureUnits;
-    writeInfo[8] = thermo->ptensor.h5 / thermo->pressureUnits;
-    writeInfo[9] = (double)sShear->cinfo->nRattler / (double)particle->nAtom;
-    writeInfo[10] = sShear->cinfo->aveCoordNum;
-    writeInfo[11] = sShear->cinfo->aveCoordNumExRattler;
-    writeInfo[12] = sShear->cinfo->meanForceExRattler;
-    fwrite(writeInfo, sizeof(double), 13, sShear->shearLog);
-    fflush(sShear->shearLog);
   }
 
   constPressIsoShearFinalize(box, particle, thermo, update, var);

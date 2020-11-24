@@ -2254,6 +2254,7 @@ void read_data(Box *box, Particle *particle, Thermo *thermo, Update *update,
           particle->massPerType[itype] = 1.0;
       } else if (strcmp(str, "box Hvoigt") == 0) {
         if (!hasDimension) {
+          // for old style DIM = 3;
           box->dim = 3;
           if (box->dim != DIM) Abort("Dimension is not consistent!");
 
@@ -2264,6 +2265,7 @@ void read_data(Box *box, Particle *particle, Thermo *thermo, Update *update,
           fread(&box->boxH[spaceIdx(0, 2)], sizeof(double), 1, fp);  // xz
           fread(&box->boxH[spaceIdx(0, 1)], sizeof(double), 1, fp);  // xy
         } else {
+          // for new style
           fread(&box->boxH, sizeof(uptriMat), 1, fp);
         }
       } else if (strcmp(str, "mean diameter") == 0) {

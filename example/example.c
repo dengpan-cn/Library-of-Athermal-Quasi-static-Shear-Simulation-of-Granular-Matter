@@ -10,6 +10,8 @@ extern int truncFileFlag;
 // compile: gcc -std=gnu99 -lm -O3 example.c -o app
 // run: ./app --trunc --rf startConf.bin --wf stopConf.bin --cvmin
 // --rf startConf.bin: the format of startConf.bin is explained in "read_data"
+// The format of binary file is described in function "read_data" and
+// "write_data"
 int main(int argc, char const *argv[]) {
   // allocate memory
   Box *box = (Box *)calloc(1, sizeof(Box));
