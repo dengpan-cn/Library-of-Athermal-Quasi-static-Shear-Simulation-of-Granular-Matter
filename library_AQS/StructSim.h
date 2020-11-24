@@ -1,3 +1,6 @@
+
+#if false
+
 #ifndef __STRUCTSIM__
 #define __STRUCTSIM__
 
@@ -252,5 +255,261 @@ typedef struct Update {
   pureShear *pShear;
   simpleShear *sShear;
 } Update;
+
+#endif
+
+#else
+
+#ifndef __STRUCTSIM__
+#define __STRUCTSIM__
+
+#include "VectorMath.h"
+
+typedef struct Box {
+  /*===
+  The simulation box is a parallelepiped: boxEdge[0],...,boxEdge[DIM-1].
+  The edges of box make up a up-triangle matrix h: boxH.
+  The inverse of matrix h (invBoxH * boxH = I) is stored in invBoxH.
+  We place the center of the parallelepiped at the origin.
+  ===*/
+
+  int dim;
+  uptriMat boxH, invBoxH;
+  double volume;
+
+  doubleVector boxEdge[DIM];
+
+  doubleVector cornerLo;
+  doubleVector cornerHi;
+
+  bool isShapeFixed;  // whether the parallelepiped will change or not.
+} Box;
+typedef struct Particle {
+  int nAtom, nAtomType;
+
+  doubleVector *pos;
+  doubleVector *veloc;
+  intVector *img;
+  doubleVector *force;
+
+  double *diameterScale,
+      meanDiameter;  // diameterScale = diameter/mean(diameter);
+
+  //===just for future feature===
+  int *type;
+  double *mass;
+  double *massPerType;
+  //===just for future feature===
+
+  // The memory are sorted to achieve better cache performance.
+  // tag is the global label which is an attribute of particle.
+  // id is the index which tells the memory location of particle.
+  // id2tag[id] : the particle's label which is stored at location id;
+  // tag2id[tag] : the memory location of particle labeled as tag;
+  int *id2tag, *tag2id;  // tag is the label, id is the index;
+
+  bool isSizeFixed;   // whether the size of particle will change or not.
+  bool isForceValid;  // whether the force is valid or not.
+} Particle;
+
+typedef struct contactInfo {
+  bool *isRattler;
+  bool *isNebrContact;
+  int allocMem4CoordNum;
+  int *nCoordNum;
+  int *nCoordNumExRattler;
+  double aveCoordNum, aveCoordNumExRattler;
+  int nRattler;
+
+  doubleVector *forceExRattler;
+  double lapUexRattler;
+  double meanForceExRattler;
+} contactInfo;
+typedef struct dumpInfo {
+  int revNum;
+  FILE *fdump;
+} dumpInfo;
+typedef struct {
+  int fd;               // the descriptor the mapped file
+  struct stat binStat;  // the stat of the opened file
+  void *dataSection;    // pointer to the mapped memory
+  int nStep;            // the number of timestep
+  int stepSize;         // the bytes of one step
+  int headerSize;
+  int revNum;
+} BinDumpFile;  // binary dump file
+
+typedef struct Thermo {
+  double massUnits, energyUnits, distanceUnits;
+  double timeUnits, forceUnits, velocityUnits;
+  double pressureUnits, volumeUnits;  // units
+
+  double dof;                   // degree of freedom
+  double Ekin, Temperature;     // kinetic energy
+  uptriMat Kintensor;           // m*v_alpha*v_beta
+  double Epair;                 // pair potential
+  double virialPair, pressure;  // virial term
+  uptriMat ptensor;             // pressure tensor
+  double volFrac;               // packing fraction
+  double lapU;  // Laplacian of U, units (forceUnits / distanceUnits)
+
+  bool isInit, Edone, Pdone, Tdone;
+
+  Toolkit toolkit;
+} Thermo;
+
+#define __minSkinSet__ 5E-3
+typedef struct idPosRadius {
+  int id;
+  doubleVector pos;
+  double radius;
+} idPosRadius;
+typedef struct NebrList {
+  // neighbour list
+  // The neighbour of particle iatom:
+  // from list[nNebr[iatom].first] (included) to list[nNebr[iatom].second]
+  // (excluded);
+  double maxDiameterScale, minDiameterScale;
+  double skinSet, rskin;
+
+  doubleVector binLen;
+  intVector nbin;
+  int totBin, allocBin;
+
+  doubleVector *xyzHold;
+  double meanDiameterHold;
+  uptriMat invBoxHold;
+
+  bool isFullStyle;  // default is false.
+
+  //====bin list====
+  idPosRadius *ipr;
+  int *nAtomPerBin;
+  int maxAtomPerBin;
+
+  //====Nebr list====
+  int *list;
+  int2 *nNebr;
+  int maxAllocNebr;
+
+  //===adjacent bin===
+  intVector *deltaAdjBin;
+  int nAdjBin;
+  //====
+
+  int *binHead4sort, *binList4sort;
+  int totBin4sort, allocBin4sort;
+  int *oid2nid;
+  void *buffer;
+
+  long int nBuild, nForce, cntForce;
+  bool isInit, isValid, doSort;
+  bool compelInit;
+} NebrList;
+
+// parameters of FIRE
+#define DELAYSTEP 5
+#define DT_GROW 1.1
+#define ALPHA_SHRINK 0.99
+#define DT_SHRINK 0.5
+#define ALPHA0 0.1
+#define maxDeltaVF 1E-3
+#define __Ptol__ 1E-4
+#define __StressTol__ 1E-14
+#define __AveZeroForce__ 1E-14
+#define __ZeroEnergy__ 1E-16
+
+typedef struct minConstBoxShapeFIRE {
+  // const-Box-shape FIRE: minimize U(r)
+  // The shape of parallelepiped is fixed!
+  // The relaxation stops if the system unjammed or the minimum reached.
+  // unjamming criteria: pair potential per particle is less than __ZeroEnergy__
+  // minimum criteria: average force amplitude is less than __AveZeroForce__
+  double dtSet;
+  double vdotf, vdotv, fdotf;
+  double aveForce;
+  double dt;
+
+  bool isInit;
+} minConstBoxShapeFIRE;
+
+typedef struct minConstPressIsoFIRE {
+  // const-iso-Pressure FIRE: minimize H(r,h) = U(r) + Pset * volume(h).
+  // The mean-diameter of particles is adjusted and the box shape is keeped.
+  // The relaxation stops if the minimum of H(r,h) reached.
+  // minimum criteria: average force amplitude is less than __AveZeroForce__
+  // and the absolute value of (P / Pset - 1.0) is less than __Ptol__
+  double Pset, ptol;
+  double gVeloc, sfact, gForce;
+
+  double dtSet;
+  double vdotf, vdotv, fdotf;
+  double aveForce;
+  double dt;
+
+  bool isInit;
+} minConstPressIsoFIRE;
+
+#ifdef __triBox__
+typedef struct minConstBoxVolFIRE {
+  // const-Box-volume FIRE: minimize U(r)
+  // The volume of parallelepiped is fixed!
+  // The relaxation stops if the system unjammed or the minimum reached.
+  // unjamming criteria: pair potential per particle is less than __ZeroEnergy__
+  // minimum criteria: average force amplitude is less than __AveZeroForce__
+  // and the relative difference among (Pxx, Pyy, Pzz,...) are less than
+  // __Ptol__ and the absolute value of (Pxy, Pxz, Pxy,...) are less than
+  // __StressTol__
+  uptriMat gVeloc, gForce;
+
+  double dtSet;
+  double vdotf, vdotv, fdotf;
+  double aveForce;
+  double dt;
+
+  bool isInit;
+} minConstBoxVolFIRE;
+typedef struct minConstPressTriFIRE {
+  // const-tri-Pressure-tensor FIRE: minimize H(r,h) = U(r) + Pset * volume(h).
+  // All parameters of boxH are adjusted.
+  // minimum criteria: average force amplitude is less than __AveZeroForce__
+  // and relative difference between (Pxx,Pyy,Pzz,...) and Pset are less than
+  // __Ptol__ and the absolute value of (Pxy, Pxz, Pxy,...) are less than
+  // __StressTol__
+  double Pset, ptol;
+  uptriMat gVeloc, gForce;
+
+  double dtSet;
+  double vdotf, vdotv, fdotf;
+  double aveForce;
+  double dt;
+
+  bool isInit;
+} minConstPressTriFIRE;
+#endif
+
+typedef struct simpleShear {
+  double gamma, deltaGamma, maxGamma;
+  FILE *shearLog;
+  dumpInfo *dinfo;
+  contactInfo *cinfo;
+
+  bool isInit;
+} simpleShear;
+
+typedef struct Update {
+  NebrList nebrList;
+
+  minConstBoxShapeFIRE *cbsFire;
+  minConstPressIsoFIRE *cpiFire;
+#ifdef __triBox__
+  minConstPressTriFIRE *cptFire;
+  minConstBoxVolFIRE *cbvFire;
+#endif
+
+  simpleShear *sShear;
+} Update;
+
+#endif
 
 #endif

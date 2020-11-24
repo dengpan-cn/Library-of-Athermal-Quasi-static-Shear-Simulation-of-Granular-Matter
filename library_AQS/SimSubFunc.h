@@ -1,3 +1,5 @@
+
+#if false
 #ifndef __SUBFUNC__
 #define __SUBFUNC__
 
@@ -1927,5 +1929,1938 @@ void getBinDumpData(Box *box, Particle *particle, Thermo *thermo,
   setBasicInfo(box, particle, thermo, update, var);
   adjustImg(box, particle, thermo, update, var);
 }
+
+#endif
+
+#else
+
+#ifndef __SUBFUNC__
+#define __SUBFUNC__
+
+#include "StructSim.h"
+#include "VectorMath.h"
+
+//===============================================================================
+void calcVolInfo(Box *box, Particle *particle, Thermo *thermo, Update *update,
+                 Variable *var) {
+  if (thermo->isInit) return;
+
+  double vol = 0;
+  double minScale = 1E10, maxScale = 0.0;
+  for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+    vol += VolUnitSphere * pow(particle->diameterScale[iatom], DIM);
+    double tmp = particle->diameterScale[iatom];
+    minScale = (minScale < tmp ? minScale : tmp);
+    maxScale = (maxScale > tmp ? maxScale : tmp);
+  }
+  update->nebrList.minDiameterScale = minScale;
+  update->nebrList.maxDiameterScale = maxScale;
+
+  thermo->volFrac = vol * pow(particle->meanDiameter * 0.5, DIM) / box->volume;
+  thermo->isInit = true;
+}
+void setBoxPara(Box *box, Particle *particle, Thermo *thermo, Update *update,
+                Variable *var) {
+  box->dim = DIM;
+  box->volume = 1.0;
+  for (int idim = 0; idim < DIM; idim++) {
+    if (box->boxH[spaceIdx(idim, idim)] <= 0.0) {
+      Abort("Not rihgt hand basis!");
+    }
+    box->volume *= box->boxH[spaceIdx(idim, idim)];
+
+    zerosVec(box->boxEdge[idim]);
+    for (int jdim = 0; jdim <= idim; jdim++) {
+      box->boxEdge[idim][jdim] = box->boxH[spaceIdx(jdim, idim)];
+    }
+  }
+
+  zerosVec(box->cornerLo);
+  for (int idim = 0; idim < DIM; idim++) {
+    vecAdd(box->cornerLo, box->cornerLo, box->boxEdge[idim]);
+  }
+  scaleVec(box->cornerLo, -0.5, box->cornerLo);
+  scaleVec(box->cornerHi, -1.0, box->cornerLo);
+
+  zerosUptriMat(box->invBoxH);
+  for (int idim = DIM - 1; idim >= 0; idim--) {
+    box->invBoxH[spaceIdx(idim, idim)] = 1.0 / box->boxH[spaceIdx(idim, idim)];
+    for (int jdim = idim + 1; jdim < DIM; jdim++) {
+      double cij = 0.0;
+      for (int k = idim + 1; k <= jdim; k++) {
+        cij += box->boxH[spaceIdx(idim, k)] * box->invBoxH[spaceIdx(k, jdim)];
+      }
+      box->invBoxH[spaceIdx(idim, jdim)] =
+          -cij / box->boxH[spaceIdx(idim, idim)];
+    }
+  }
+}
+void setBasicInfo(Box *box, Particle *particle, Thermo *thermo, Update *update,
+                  Variable *var) {
+  calcVolInfo(box, particle, thermo, update, var);
+
+  thermo->massUnits = 1.0;
+  thermo->energyUnits = 1.0;
+  thermo->distanceUnits = particle->meanDiameter;
+  thermo->timeUnits =
+      sqrt(thermo->massUnits / thermo->energyUnits) * thermo->distanceUnits;
+  thermo->forceUnits = thermo->energyUnits / thermo->distanceUnits;
+  thermo->velocityUnits = sqrt(thermo->energyUnits / thermo->massUnits);
+  thermo->pressureUnits = thermo->energyUnits / pow(thermo->distanceUnits, DIM);
+  thermo->volumeUnits = pow(thermo->distanceUnits, DIM);
+}
+void adjustImg(Box *box, Particle *particle, Thermo *thermo, Update *update,
+               Variable *var) {
+#ifdef __orthBox__
+  for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+    doubleVecPtr posPtr = particle->pos[iatom];
+    intVecPtr imgPtr = particle->img[iatom];
+
+    // lamda_O = invH * r; lamda_lo = lamda_O + (0.5, 0.5, 0.5)
+    doubleVector lamda;
+    MatMulVec(lamda, box->invBoxH, posPtr);
+    vecShiftAll(lamda, 0.5);
+
+    intVector shiftImg;
+    for (int idim = 0; idim < DIM; idim++) {
+      shiftImg[idim] = (int)floor(lamda[idim]);
+    }
+    vecAdd(imgPtr, imgPtr, shiftImg);
+
+    doubleVector shiftPos;
+    MatMulVec(shiftPos, box->boxH, shiftImg);
+    vecSub(posPtr, posPtr, shiftPos);
+  }
+#endif
+#ifdef __triBox__
+  bool isFlip = false;
+  doubleVector maxTilt;
+  for (int idim = 0; idim < DIM; idim++) {
+    maxTilt[idim] = 0.505 * box->boxH[spaceIdx(idim, idim)];
+  }
+  doubleVector boxEdge[DIM];
+  memcpy(boxEdge, box->boxEdge, DIM * sizeof(doubleVector));
+  for (int idim = DIM - 1; idim >= 0; idim--) {
+    for (int tilt = idim - 1; tilt >= 0; tilt--) {
+      if (boxEdge[idim][tilt] >= maxTilt[tilt]) {
+        vecSub(boxEdge[idim], boxEdge[idim], boxEdge[tilt]);
+        isFlip = true;
+      } else if (boxEdge[idim][tilt] < -maxTilt[tilt]) {
+        vecAdd(boxEdge[idim], boxEdge[idim], boxEdge[tilt]);
+        isFlip = true;
+      }
+    }
+  }
+  if (isFlip) {
+    for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+      unwrapPos(particle->pos[iatom], particle->pos[iatom],
+                particle->img[iatom], box->boxH);
+    }
+    memset(particle->img, '\0', particle->nAtom * sizeof(intVector));
+
+    for (int idim = 0; idim < DIM; idim++) {
+      for (int jdim = idim; jdim < DIM; jdim++) {
+        box->boxH[spaceIdx(idim, jdim)] = boxEdge[jdim][idim];
+      }
+    }
+    setBoxPara(box, particle, thermo, update, var);
+  }
+
+  for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+    doubleVecPtr posPtr = particle->pos[iatom];
+    intVecPtr imgPtr = particle->img[iatom];
+
+    // lamda_O = invH * r; lamda_lo = lamda_O + (0.5, 0.5, 0.5)
+    doubleVector lamda;
+    MatMulVec(lamda, box->invBoxH, posPtr);
+    vecShiftAll(lamda, 0.5);
+
+    intVector shiftImg;
+    for (int idim = 0; idim < DIM; idim++) {
+      shiftImg[idim] = (int)floor(lamda[idim]);
+    }
+    vecAdd(imgPtr, imgPtr, shiftImg);
+
+    doubleVector shiftPos;
+    MatMulVec(shiftPos, box->boxH, shiftImg);
+    vecSub(posPtr, posPtr, shiftPos);
+  }
+#endif
+}
+//===============================================================================
+void read_dump(Box *box, Particle *particle, Thermo *thermo, Update *update,
+               Variable *var) {
+  int whichVar = findVariable(var, "rd");
+  if (whichVar < 0) Abort("--rd dump.bin whichStep");
+  if (var->cmd[whichVar].cmdArgc != 2) Abort("--rd dump.bin whichStep");
+  int whichStep = (int)atoi(var->cmd[whichVar].cmdArgv[1]);
+
+  int fd = open(var->cmd[whichVar].cmdArgv[0], O_RDONLY);
+  struct stat binStat;
+  fstat(fd, &binStat);
+  void *memPtr = mmap(NULL, binStat.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  if (memPtr == MAP_FAILED) Abort("Failed to map file!");
+  if (particle->pos != NULL) Abort("--rf or --rd");
+
+  // header
+  char *header = (char *)memPtr;
+  void *data = memPtr;
+  int dumpRevNum = 0;
+  if (strcmp(header, "Revised Binary File") == 0) {
+    int *revNum = (int *)(header + 32);
+    dumpRevNum = revNum[0];
+    int *dim = (int *)(revNum + 1);
+    if (dim[0] != DIM) {
+      Abort("The dumpfile is for d = %d, while the code is for d = %d!", dim[0],
+            DIM);
+    }
+    data = (void *)(dim + 1);
+  } else {
+    if (DIM != 3) {
+      Abort("The dumpfile is for d = 3, while the code is for d = %d!", DIM);
+    }
+  }
+  box->dim = DIM;
+
+  particle->nAtom = *((int *)data);
+  data = (void *)((char *)data + sizeof(int));
+  particle->nAtomType = *((int *)data);
+  data = (void *)((char *)data + sizeof(int));
+
+  particle->pos = (doubleVector *)calloc(particle->nAtom, sizeof(doubleVector));
+  particle->veloc =
+      (doubleVector *)calloc(particle->nAtom, sizeof(doubleVector));
+  particle->force =
+      (doubleVector *)calloc(particle->nAtom, sizeof(doubleVector));
+  particle->mass = (double *)calloc(particle->nAtom, sizeof(double));
+  particle->img = (intVector *)calloc(particle->nAtom, sizeof(intVector));
+  particle->type = (int *)calloc(particle->nAtom, sizeof(int));
+  particle->diameterScale = (double *)calloc(particle->nAtom, sizeof(double));
+  particle->id2tag = (int *)calloc(particle->nAtom, sizeof(int));
+  particle->tag2id = (int *)calloc(particle->nAtom, sizeof(int));
+  memcpy(particle->diameterScale, data, particle->nAtom * sizeof(double));
+  for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+    particle->id2tag[iatom] = iatom;
+    particle->tag2id[iatom] = iatom;
+  }
+  data = (void *)((char *)data + sizeof(double) * particle->nAtom);
+
+  particle->massPerType = (double *)calloc(particle->nAtomType, sizeof(double));
+  for (int itype = 0; itype < particle->nAtomType; itype++)
+    particle->massPerType[itype] = 1.0;
+  memcpy(particle->type, data, particle->nAtom * sizeof(int));
+  for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+    particle->mass[iatom] = particle->massPerType[particle->type[iatom]];
+  }
+
+  int headerSize = sizeof(int) + sizeof(int) +
+                   particle->nAtom * (sizeof(double) + sizeof(int));
+  if (dumpRevNum == 1) {
+    headerSize += 32 * sizeof(char) + 2 * sizeof(int);
+  }
+
+  int stepSize = sizeof(int) + sizeof(uptriMat) + sizeof(double) +
+                 particle->nAtom * sizeof(doubleVector);
+
+  int nStep = (binStat.st_size - headerSize) / stepSize;
+  if (whichStep < 0 || whichStep >= nStep) Abort("Range: [0,%d];", nStep);
+  data = ((char *)memPtr + headerSize + whichStep * stepSize + sizeof(int));
+
+  if (dumpRevNum == 0) {
+    double *tmp = (double *)data;
+    box->boxH[spaceIdx(0, 0)] = tmp[0];
+    box->boxH[spaceIdx(1, 1)] = tmp[1];
+    box->boxH[spaceIdx(2, 2)] = tmp[2];
+    box->boxH[spaceIdx(1, 2)] = tmp[3];
+    box->boxH[spaceIdx(0, 2)] = tmp[4];
+    box->boxH[spaceIdx(0, 1)] = tmp[5];
+    data = ((char *)data + 6 * sizeof(double));
+  } else {
+    memcpy(box->boxH, data, sizeof(uptriMat));
+    data = ((char *)data + sizeof(uptriMat));
+  }
+
+  particle->meanDiameter = *((double *)data);
+  data = ((char *)data + sizeof(double));
+
+  memcpy(particle->pos, data, particle->nAtom * sizeof(doubleVector));
+  memset(particle->veloc, '\0', particle->nAtom * sizeof(doubleVector));
+  memset(particle->force, '\0', particle->nAtom * sizeof(doubleVector));
+  memset(particle->img, '\0', particle->nAtom * sizeof(intVector));
+
+  munmap(memPtr, binStat.st_size);
+  close(fd);
+
+  box->isShapeFixed = true;
+  particle->isSizeFixed = true;
+  particle->isForceValid = false;
+  thermo->Edone = thermo->Pdone = thermo->Tdone = false;
+  thermo->isInit = false;
+  update->nebrList.isFullStyle = false;
+  update->nebrList.isInit = false;
+  update->nebrList.isValid = false;
+  update->nebrList.compelInit = true;
+  update->nebrList.nForce = 0;
+  update->nebrList.cntForce = 0;
+  update->nebrList.doSort = true;
+
+  setBoxPara(box, particle, thermo, update, var);
+  setBasicInfo(box, particle, thermo, update, var);
+  adjustImg(box, particle, thermo, update, var);
+}
+void read_data(Box *box, Particle *particle, Thermo *thermo, Update *update,
+               Variable *var) {
+  int whichVar = findVariable(var, "rf");
+  if (whichVar < 0 || var->cmd[whichVar].cmdArgc == 0)
+    Abort("read data: --rf lmp.bin");
+  FILE *fp = openReadOnlyFile(var->cmd[whichVar].cmdArgv[0]);
+  if (particle->pos != NULL) Abort("--rf or --rd");
+
+  char str[4096];
+  fgets(str, 4096, fp);
+  if (strcmp(str, "binary") == 0) {
+    bool hasMeanDiameter = false, hasDimension = false;
+    while (fread(str, sizeof(char), 32, fp) == 32) {
+      if (strcmp(str, "dimension") == 0) {
+        fread(&box->dim, sizeof(int), 1, fp);
+        if (box->dim != DIM)
+          Abort("The file is for d = %d, while the code is for d = %d!",
+                box->dim, DIM);
+        hasDimension = true;
+      } else if (strcmp(str, "atoms") == 0) {
+        fread(&particle->nAtom, sizeof(int), 1, fp);
+        if (particle->nAtom <= 0) Abort("Wrong File!");
+
+        particle->pos =
+            (doubleVector *)calloc(particle->nAtom, sizeof(doubleVector));
+        particle->veloc =
+            (doubleVector *)calloc(particle->nAtom, sizeof(doubleVector));
+        particle->force =
+            (doubleVector *)calloc(particle->nAtom, sizeof(doubleVector));
+        particle->mass = (double *)calloc(particle->nAtom, sizeof(double));
+        particle->img = (intVector *)calloc(particle->nAtom, sizeof(intVector));
+        particle->type = (int *)calloc(particle->nAtom, sizeof(int));
+        particle->diameterScale =
+            (double *)calloc(particle->nAtom, sizeof(double));
+        particle->id2tag = (int *)calloc(particle->nAtom, sizeof(int));
+        particle->tag2id = (int *)calloc(particle->nAtom, sizeof(int));
+      } else if (strcmp(str, "atom types") == 0) {
+        fread(&particle->nAtomType, sizeof(int), 1, fp);
+        if (particle->nAtomType <= 0) Abort("Wrong File!");
+
+        particle->massPerType =
+            (double *)calloc(particle->nAtomType, sizeof(double));
+        for (int itype = 0; itype < particle->nAtomType; itype++)
+          particle->massPerType[itype] = 1.0;
+      } else if (strcmp(str, "box Hvoigt") == 0) {
+        if (!hasDimension) {
+          box->dim = 3;
+          if (box->dim != DIM) Abort("Dimension is not consistent!");
+
+          fread(&box->boxH[spaceIdx(0, 0)], sizeof(double), 1, fp);  // xx
+          fread(&box->boxH[spaceIdx(1, 1)], sizeof(double), 1, fp);  // yy
+          fread(&box->boxH[spaceIdx(2, 2)], sizeof(double), 1, fp);  // zz
+          fread(&box->boxH[spaceIdx(1, 2)], sizeof(double), 1, fp);  // yz
+          fread(&box->boxH[spaceIdx(0, 2)], sizeof(double), 1, fp);  // xz
+          fread(&box->boxH[spaceIdx(0, 1)], sizeof(double), 1, fp);  // xy
+        } else {
+          fread(&box->boxH, sizeof(uptriMat), 1, fp);
+        }
+      } else if (strcmp(str, "mean diameter") == 0) {
+        fread(&particle->meanDiameter, sizeof(double), 1, fp);
+        hasMeanDiameter = true;
+      } else if (strcmp(str, "Atoms") == 0) {
+        for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+          fread(&particle->type[iatom], sizeof(int), 1, fp);
+          fread(&particle->diameterScale[iatom], sizeof(double), 1, fp);
+          fread(&particle->pos[iatom], sizeof(doubleVector), 1, fp);
+          fread(&particle->img[iatom], sizeof(intVector), 1, fp);
+
+          particle->mass[iatom] = particle->massPerType[particle->type[iatom]];
+
+          particle->tag2id[iatom] = iatom;
+          particle->id2tag[iatom] = iatom;
+        }
+      } else if (strcmp(str, "Velocities") == 0) {
+        for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+          fread(&particle->veloc[iatom], sizeof(doubleVector), 1, fp);
+        }
+      } else
+        Abort("Wrong File!");
+    }
+    if (!hasMeanDiameter) {
+      double meanDiameter = 0.0;
+      for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+        meanDiameter += particle->diameterScale[iatom];
+      }
+      meanDiameter = meanDiameter / particle->nAtom;
+      for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+        particle->diameterScale[iatom] /= meanDiameter;
+      }
+      particle->meanDiameter = meanDiameter;
+    }
+  } else
+    Abort("Wrong File!");
+  safeCloseFile(fp);
+
+  box->isShapeFixed = true;
+  particle->isSizeFixed = true;
+  particle->isForceValid = false;
+  thermo->Edone = thermo->Pdone = thermo->Tdone = false;
+  thermo->isInit = false;
+  update->nebrList.isFullStyle = false;
+  update->nebrList.isInit = false;
+  update->nebrList.isValid = false;
+  update->nebrList.compelInit = true;
+  update->nebrList.nForce = 0;
+  update->nebrList.cntForce = 0;
+  update->nebrList.doSort = true;
+
+  setBoxPara(box, particle, thermo, update, var);
+  setBasicInfo(box, particle, thermo, update, var);
+  adjustImg(box, particle, thermo, update, var);
+
+  // reset image
+  if (truncFileFlag != 2)
+    memset(particle->img, '\0', particle->nAtom * sizeof(intVector));
+}
+void readFile(Box *box, Particle *particle, Thermo *thermo, Update *update,
+              Variable *var) {
+  int cntR = 0;
+  if (findVariable(var, "rf") >= 0) {
+    read_data(box, particle, thermo, update, var);
+    cntR++;
+  }
+  if (findVariable(var, "rd") >= 0) {
+    read_dump(box, particle, thermo, update, var);
+    cntR++;
+  }
+  if (cntR != 1) Abort("--rf or --rd");
+
+#ifdef __orthBox__
+  for (int idim = 0; idim < DIM; idim++) {
+    for (int jdim = idim + 1; jdim < DIM; jdim++) {
+      if (fabs(box->boxH[spaceIdx(idim, jdim)]) >= 5E-16)
+        Abort("Not orthogonal Box!");
+      box->boxH[spaceIdx(idim, jdim)] = 0;
+    }
+  }
+#endif
+}
+void write_data(Box *box, Particle *particle, Thermo *thermo, Update *update,
+                Variable *var) {
+  int whichVar = findVariable(var, "wf");
+  if (whichVar < 0) return;
+  if (var->cmd[whichVar].cmdArgc == 0) Abort("--wf output.bin");
+
+  setBoxPara(box, particle, thermo, update, var);
+  setBasicInfo(box, particle, thermo, update, var);
+  adjustImg(box, particle, thermo, update, var);
+
+  FILE *fbin = createReadWriteFile(var->cmd[whichVar].cmdArgv[0]);
+  {
+    char str[4096];
+    // header
+    memset(str, '\0', 4096 * sizeof(char));
+    sprintf(str, "binary");
+    str[31] = '\n';
+    fwrite(str, sizeof(char), 32, fbin);  // 32 byte;
+    // dimension
+    memset(str, '\0', 4096 * sizeof(char));
+    sprintf(str, "dimension");
+    fwrite(str, sizeof(char), 32, fbin);  // 32 byte;
+    fwrite(&box->dim, sizeof(int), 1, fbin);
+    // nAtom atoms
+    memset(str, '\0', 4096 * sizeof(char));
+    sprintf(str, "atoms");
+    fwrite(str, sizeof(char), 32, fbin);
+    fwrite(&particle->nAtom, sizeof(int), 1, fbin);
+    // nAtomType atom types
+    memset(str, '\0', 4096 * sizeof(char));
+    sprintf(str, "atom types");
+    fwrite(str, sizeof(char), 32, fbin);
+    fwrite(&particle->nAtomType, sizeof(int), 1, fbin);
+    // box Hvoigt
+    memset(str, '\0', 4096 * sizeof(char));
+    sprintf(str, "box Hvoigt");
+    fwrite(str, sizeof(char), 32, fbin);
+    fwrite(&box->boxH, sizeof(uptriMat), 1, fbin);
+    // mean diameter
+    memset(str, '\0', 4096 * sizeof(char));
+    sprintf(str, "mean diameter");
+    fwrite(str, sizeof(char), 32, fbin);
+    fwrite(&particle->meanDiameter, sizeof(double), 1, fbin);
+    // Atoms Info
+    memset(str, '\0', 4096 * sizeof(char));
+    sprintf(str, "Atoms");
+    fwrite(str, sizeof(char), 32, fbin);
+    for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+      int idx = particle->tag2id[iatom];
+
+      int type = particle->type[idx];
+      double diaScale = particle->diameterScale[idx];
+      doubleVecPtr posPtr = particle->pos[idx];
+      intVecPtr imgPtr = particle->img[idx];
+
+      fwrite(&type, sizeof(int), 1, fbin);
+      fwrite(&diaScale, sizeof(double), 1, fbin);
+      fwrite(posPtr, sizeof(doubleVector), 1, fbin);
+      fwrite(imgPtr, sizeof(intVector), 1, fbin);
+    }
+  }
+  safeCloseFile(fbin);
+}
+//===============================================================================
+void parseCmdLine(Box *box, Particle *particle, Thermo *thermo, Update *update,
+                  Variable *var, int argc, char **argv) {
+  // find --trunc or --append tag
+  for (int iarg = 1; iarg < argc; iarg++) {
+    if (!strcmp(argv[iarg], "--trunc")) {
+      if (truncFileFlag != 0) Abort("--trunc or --append");
+      truncFileFlag = 1;
+    } else if (!strcmp(argv[iarg], "--append")) {
+      if (truncFileFlag != 0) Abort("--trunc or --append");
+      truncFileFlag = 2;
+    }
+  }
+
+  // parse cmd line
+  var->maxVar = 8;
+  var->cmd = (cmdArg *)calloc(var->maxVar, sizeof(cmdArg));
+  for (int iarg = 1; iarg < argc;) {
+    if (!strcmp(argv[iarg], "--log")) {
+      if (iarg + 1 >= argc) Abort("Not variable pair!");
+      logFile = createReadWriteFile(argv[iarg + 1]);
+      iarg += 2;
+    } else if (!strcmp(argv[iarg], "--trunc") ||
+               !strcmp(argv[iarg], "--append")) {
+      iarg++;
+    } else if (!strcmp(argv[iarg], "--cwd")) {
+      if (iarg + 1 >= argc) Abort("--cwd .");
+      int len = strlen(argv[iarg + 1]) + 2;
+      var->cwd = (char *)calloc(len, sizeof(char));
+      sprintf(var->cwd, "%s", argv[iarg + 1]);
+      iarg += 2;
+    } else if (!strcmp(argv[iarg], "--sf")) {
+      if (iarg + 1 >= argc) Abort("--sf id");
+      int len = strlen(argv[iarg + 1]) + 2;
+      var->sf = (char *)calloc(len, sizeof(char));
+      sprintf(var->sf, "%s", argv[iarg + 1]);
+      iarg += 2;
+    } else if (!strcmp(argv[iarg], "--skin")) {
+      if (iarg + 1 >= argc) Abort("--skin 0.2");
+      double skinSet = atof(argv[iarg + 1]);
+      if (skinSet <= 0.0) Abort("Wrong skin");
+      update->nebrList.skinSet = skinSet;
+      iarg += 2;
+    } else if (!strncmp(argv[iarg], "--", 2)) {
+      if (findVariable(var, argv[iarg] + 2) >= 0)
+        Abort("Repetitive cmd: %s", (argv[iarg] + 2));
+      if (var->nVar == var->maxVar) {
+        var->maxVar += 8;
+        var->cmd = (cmdArg *)realloc(var->cmd, var->maxVar * sizeof(cmdArg));
+      }
+
+      int nsize = strlen(argv[iarg]) - 2 + 1;
+      var->cmd[var->nVar].cmdArgc = 0;
+      var->cmd[var->nVar].cmdArgv = NULL;
+      int cmdArgvStart = iarg + 1;
+
+      iarg++;
+      while (iarg < argc && strncmp(argv[iarg], "--", 2)) {
+        var->cmd[var->nVar].cmdArgc++;
+        nsize += strlen(argv[iarg]) + 1;
+        iarg++;
+      }
+      if (var->cmd[var->nVar].cmdArgc != 0) {
+        var->cmd[var->nVar].cmdArgv =
+            (char **)calloc(var->cmd[var->nVar].cmdArgc, sizeof(char *));
+      }
+      char *ptr = (char *)calloc(nsize + 5, sizeof(char));
+
+      var->cmd[var->nVar].cmdType = ptr;
+      memcpy(ptr, argv[cmdArgvStart - 1] + 2,
+             (strlen(argv[cmdArgvStart - 1]) - 2 + 1) * sizeof(char));
+      ptr += strlen(argv[cmdArgvStart - 1]) - 2 + 1;
+      for (int ith = cmdArgvStart; ith < iarg; ith++) {
+        var->cmd[var->nVar].cmdArgv[ith - cmdArgvStart] = ptr;
+        memcpy(ptr, argv[ith], (strlen(argv[ith]) + 1) * sizeof(char));
+        ptr += strlen(argv[ith]) + 1;
+      }
+
+      var->nVar++;
+    } else
+      Abort("Unrecognized cmd %s!", argv[iarg]);
+  }
+
+  if (var->cwd == NULL) {
+    var->cwd = (char *)calloc(3, sizeof(char));
+    sprintf(var->cwd, ".");
+  }
+  if (var->sf == NULL) {
+    var->sf = (char *)calloc(9, sizeof(char));
+    sprintf(var->sf, "default");
+  }
+  if (update->nebrList.skinSet <= 0) {
+    update->nebrList.skinSet = 0.1 / 1.1;
+  }
+  if (findVariable(var, "read_dump") >= 0) return;
+
+  readFile(box, particle, thermo, update, var);
+
+  printf("===========System Info==========\n");
+  printf("Dimension: %d\n", DIM);
+  printf("Number of Particles: %d;\n", particle->nAtom);
+  printf("Volume Fraction: %g;\n", thermo->volFrac);
+  printf("Min(diameter): %g;\nMax(diameter): %g;\n",
+         update->nebrList.minDiameterScale, update->nebrList.maxDiameterScale);
+  printf("Edges of Simulation Box: \n");
+  for (int idim = 0; idim < DIM; idim++) {
+    for (int jdim = 0; jdim < DIM; jdim++) {
+      printf("\t");
+      printf("%-8.6e\t", box->boxEdge[idim][jdim] / thermo->distanceUnits);
+    }
+    printf("\n");
+  }
+  printf("===========System Info==========\n");
+}
+//===============================================================================
+void calcDistBoxPlane(doubleVector distPlane, doubleVector boxEdge[DIM]) {
+  doubleVector edge[DIM];
+
+#if false
+  for (int idim = 0; idim < DIM; idim++) {
+    for (int ith = 0, ord = 0; ith < DIM; ith++) {
+      if (ith != idim) {
+        cpyVec(edge[ord], boxEdge[ith]);
+        ord++;
+      }
+    }
+    cpyVec(edge[DIM - 1], boxEdge[idim]);
+
+    for (int ith = 0; ith < DIM; ith++) {
+      vecUnit(edge[ith], edge[ith]);
+      for (int jth = ith + 1; jth < DIM; jth++) {
+        double dotProd = 0.0;
+        vecDot(dotProd, edge[ith], edge[jth]);
+        vecScaleAdd(edge[jth], edge[jth], -dotProd, edge[ith]);
+      }
+    }
+
+    vecDot(distPlane[idim], boxEdge[idim], edge[DIM - 1]);
+    distPlane[idim] = fabs(distPlane[idim]);
+  }
+#endif
+
+  for (int idim = 0; idim < DIM; idim++) {
+    zerosVec(edge[idim]);
+    edge[idim][idim] = 1.0;
+  }
+  for (int idim = DIM - 1; idim >= 0; idim--) {
+    for (int ith = idim; ith < DIM - 1; ith++) {
+      cpyVec(edge[ith], boxEdge[ith + 1]);
+      memset(edge[ith], '\0', idim * sizeof(double));
+    }
+    cpyVec(edge[DIM - 1], boxEdge[idim]);
+    memset(edge[DIM - 1], '\0', idim * sizeof(double));
+
+    for (int ith = idim; ith < DIM; ith++) {
+      vecUnit(edge[ith], edge[ith]);
+      for (int jth = ith + 1; jth < DIM; jth++) {
+        double dotProd = 0.0;
+        vecDot(dotProd, edge[ith], edge[jth]);
+        vecScaleAdd(edge[jth], edge[jth], -dotProd, edge[ith]);
+      }
+    }
+
+    vecDot(distPlane[idim], boxEdge[idim], edge[DIM - 1]);
+    distPlane[idim] = fabs(distPlane[idim]);
+  }
+}
+
+void sortParticle(Box *box, Particle *particle, Thermo *thermo, Update *update,
+                  Variable *var) {
+  if (!update->nebrList.doSort) return;
+
+  NebrList *nebrList = &update->nebrList;
+  doubleVector distPlane;
+  calcDistBoxPlane(distPlane, box->boxEdge);
+
+  double sysRcs = particle->meanDiameter * (1.0 + nebrList->skinSet);
+  nebrList->totBin4sort = 1;
+  intVector nbin4sort;
+  for (int idim = 0; idim < DIM; idim++) {
+    nbin4sort[idim] = (int)floor(distPlane[idim] / sysRcs);
+    nbin4sort[idim] = cpuMax(nbin4sort[idim], 1);
+    nebrList->totBin4sort *= nbin4sort[idim];
+  }
+  if (nebrList->totBin4sort > nebrList->allocBin4sort) {
+    nebrList->binHead4sort = (int *)realloc(
+        nebrList->binHead4sort, nebrList->totBin4sort * sizeof(int));
+    nebrList->allocBin4sort = nebrList->totBin4sort;
+  }
+
+  for (int ibin = 0; ibin < nebrList->totBin4sort; ibin++) {
+    nebrList->binHead4sort[ibin] = -1;
+  }
+  for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+    doubleVecPtr pos = particle->pos[iatom];
+
+    intVector cIdx;
+    doubleVector lamda;
+    MatMulVec(lamda, box->invBoxH, pos);
+    vecShiftAll(lamda, 0.5);
+    int binIdx = 0;
+    for (int idim = DIM - 1; idim >= 0; idim--) {
+      cIdx[idim] = (int)floor(lamda[idim] * nbin4sort[idim]);
+      cIdx[idim] = (cIdx[idim] < 0 ? nbin4sort[idim] - 1 : cIdx[idim]);
+      cIdx[idim] = (cIdx[idim] >= nbin4sort[idim] ? 0 : cIdx[idim]);
+      binIdx = binIdx * nbin4sort[idim] + cIdx[idim];
+    }
+    nebrList->binList4sort[iatom] = nebrList->binHead4sort[binIdx];
+    nebrList->binHead4sort[binIdx] = iatom;
+  }
+
+  for (int idx = 0, noid = 0; idx < nebrList->totBin4sort; idx++) {
+    int oid = nebrList->binHead4sort[idx];
+    while (oid != -1) {
+      nebrList->oid2nid[oid] = noid;
+      noid++;
+      oid = nebrList->binList4sort[oid];
+    }
+  }
+
+  exchange_doubleVector(particle->pos, (doubleVector *)nebrList->buffer,
+                        nebrList->oid2nid, particle->nAtom);
+  memcpy(particle->pos, nebrList->buffer,
+         particle->nAtom * sizeof(doubleVector));
+
+  exchange_doubleVector(particle->veloc, (doubleVector *)nebrList->buffer,
+                        nebrList->oid2nid, particle->nAtom);
+  memcpy(particle->veloc, nebrList->buffer,
+         particle->nAtom * sizeof(exchange_doubleVector));
+
+  exchange_intVector(particle->img, (intVector *)nebrList->buffer,
+                     nebrList->oid2nid, particle->nAtom);
+  memcpy(particle->img, nebrList->buffer, particle->nAtom * sizeof(intVector));
+
+  exchange_double(particle->mass, (double *)nebrList->buffer, nebrList->oid2nid,
+                  particle->nAtom);
+  memcpy(particle->mass, nebrList->buffer, particle->nAtom * sizeof(double));
+
+  exchange_double(particle->diameterScale, (double *)nebrList->buffer,
+                  nebrList->oid2nid, particle->nAtom);
+  memcpy(particle->diameterScale, nebrList->buffer,
+         particle->nAtom * sizeof(double));
+
+  exchange_int(particle->type, (int *)nebrList->buffer, nebrList->oid2nid,
+               particle->nAtom);
+  memcpy(particle->type, nebrList->buffer, particle->nAtom * sizeof(int));
+
+  exchange_int(particle->id2tag, (int *)nebrList->buffer, nebrList->oid2nid,
+               particle->nAtom);
+  memcpy(particle->id2tag, nebrList->buffer, particle->nAtom * sizeof(int));
+
+  for (int aid = 0; aid < particle->nAtom; aid++) {
+    particle->tag2id[particle->id2tag[aid]] = aid;
+  }
+
+  update->nebrList.isValid = false;
+
+  // reset
+  nebrList->maxAtomPerBin = 0;
+}
+void initNebrList(Box *box, Particle *particle, Thermo *thermo, Update *update,
+                  Variable *var) {
+  NebrList *nebrList = &update->nebrList;
+  if (nebrList->isInit) return;
+
+  if (nebrList->xyzHold == NULL) {
+    nebrList->xyzHold =
+        (doubleVector *)calloc(particle->nAtom, sizeof(doubleVector));
+  }
+  if (nebrList->nNebr == NULL) {
+    nebrList->nNebr = (int2 *)calloc(particle->nAtom, sizeof(int2));
+  }
+
+  if (nebrList->binList4sort == NULL) {
+    nebrList->binList4sort = (int *)calloc(particle->nAtom, sizeof(int));
+  }
+  if (nebrList->oid2nid == NULL) {
+    nebrList->oid2nid = (int *)calloc(particle->nAtom, sizeof(int));
+  }
+  if (nebrList->buffer == NULL) {
+    nebrList->buffer = calloc(particle->nAtom, sizeof(doubleVector));
+  }
+
+  nebrList->isInit = true;
+}
+
+void calcBinParam(Box *box, Particle *particle, Thermo *thermo, Update *update,
+                  Variable *var) {
+  NebrList *nebrList = &update->nebrList;
+  if (!nebrList->compelInit && box->isShapeFixed && particle->isSizeFixed &&
+      nebrList->deltaAdjBin)
+    return;
+
+  doubleVector distPlane;
+  calcDistBoxPlane(distPlane, box->boxEdge);
+
+  nebrList->rskin =
+      nebrList->minDiameterScale * particle->meanDiameter * nebrList->skinSet;
+  double sysRcs =
+      nebrList->maxDiameterScale * particle->meanDiameter + nebrList->rskin;
+  double maxRcut = nebrList->maxDiameterScale * particle->meanDiameter;
+  nebrList->totBin = 1;
+  for (int idim = 0; idim < DIM; idim++) {
+    nebrList->nbin[idim] = (int)floor(distPlane[idim] / sysRcs);
+    nebrList->nbin[idim] = cpuMax(nebrList->nbin[idim], 1);
+    nebrList->totBin *= nebrList->nbin[idim];
+    nebrList->binLen[idim] = distPlane[idim] / nebrList->nbin[idim];
+    if (maxRcut >= distPlane[idim]) Abort("The Box is too samll!");
+  }
+
+  intVector xyzNum, bstart, bstop, ndb;
+  int nAdjBin = 1;
+  for (int idim = 0; idim < DIM; idim++) {
+    xyzNum[idim] =
+        (int)ceil((maxRcut + nebrList->rskin) / nebrList->binLen[idim]);
+    bstart[idim] = -xyzNum[idim];
+    bstop[idim] = xyzNum[idim];
+    ndb[idim] = 2 * xyzNum[idim] + 1;
+    nAdjBin *= ndb[idim];
+  }
+
+  if (!nebrList->isFullStyle) {
+    int nRecord = nAdjBin / 2 + 1;
+    if (nRecord > nebrList->nAdjBin)
+      nebrList->deltaAdjBin = (intVector *)realloc(nebrList->deltaAdjBin,
+                                                   nRecord * sizeof(intVector));
+
+    nebrList->nAdjBin = 0;
+    // for (int idx = nAdjBin - 1; idx >= 0; idx--) {
+    for (int idx = 0; idx < nAdjBin; idx++) {
+      intVector delta;
+      int In = idx;
+      for (int idim = 0; idim < DIM; idim++) {
+        delta[idim] = In % ndb[idim] + bstart[idim];
+        In = In / ndb[idim];
+      }
+      In = 0;
+      for (int idim = DIM - 1; idim >= 0; idim--) {
+        In = In * ndb[idim] + delta[idim];
+      }
+      if (In < 0) continue;
+      cpyVec(nebrList->deltaAdjBin[nebrList->nAdjBin], delta);
+      nebrList->nAdjBin++;
+    }
+  } else {
+    if (nAdjBin > nebrList->nAdjBin)
+      nebrList->deltaAdjBin = (intVector *)realloc(nebrList->deltaAdjBin,
+                                                   nAdjBin * sizeof(intVector));
+    nebrList->nAdjBin = 0;
+    for (int idx = nAdjBin - 1; idx >= 0; idx--) {
+      intVector delta;
+      int In = idx;
+      for (int idim = 0; idim < DIM; idim++) {
+        delta[idim] = In % ndb[idim] + bstart[idim];
+        In = In / ndb[idim];
+      }
+      cpyVec(nebrList->deltaAdjBin[nebrList->nAdjBin], delta);
+      nebrList->nAdjBin++;
+    }
+  }
+
+  if (nebrList->totBin > nebrList->allocBin) {
+    nebrList->nAtomPerBin =
+        (int *)realloc(nebrList->nAtomPerBin, nebrList->totBin * sizeof(int));
+    nebrList->allocBin = nebrList->totBin;
+  }
+
+  nebrList->compelInit = false;
+}
+void binParticle(Box *box, Particle *particle, Thermo *thermo, Update *update,
+                 Variable *var) {
+  NebrList *nebrList = &update->nebrList;
+
+  calcBinParam(box, particle, thermo, update, var);
+
+  bool overFlow = false;
+  do {
+    overFlow = false;
+    memset(nebrList->nAtomPerBin, '\0', nebrList->totBin * sizeof(int));
+    int maxPartPerBin = nebrList->maxAtomPerBin;
+    for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+      idPosRadius data;
+      data.id = iatom;
+      cpyVec(data.pos, particle->pos[iatom]);
+      data.radius =
+          0.5 * particle->meanDiameter * particle->diameterScale[iatom];
+
+      intVector cIdx;
+      doubleVector lamda;
+      MatMulVec(lamda, box->invBoxH, data.pos);
+      vecShiftAll(lamda, 0.5);
+      int binIdx = 0;
+      for (int idim = DIM - 1; idim >= 0; idim--) {
+        cIdx[idim] = (int)floor(lamda[idim] * nebrList->nbin[idim]);
+        cIdx[idim] = (cIdx[idim] < 0 ? nebrList->nbin[idim] - 1 : cIdx[idim]);
+        cIdx[idim] = (cIdx[idim] >= nebrList->nbin[idim] ? 0 : cIdx[idim]);
+        binIdx = binIdx * nebrList->nbin[idim] + cIdx[idim];
+      }
+
+      if (nebrList->nAtomPerBin[binIdx] < nebrList->maxAtomPerBin) {
+        nebrList->ipr[nebrList->maxAtomPerBin * binIdx +
+                      nebrList->nAtomPerBin[binIdx]] = data;
+
+        nebrList->nAtomPerBin[binIdx]++;
+      } else {
+        nebrList->nAtomPerBin[binIdx]++;
+        maxPartPerBin = (nebrList->nAtomPerBin[binIdx] > maxPartPerBin)
+                            ? nebrList->nAtomPerBin[binIdx]
+                            : maxPartPerBin;
+        overFlow = true;
+      }
+    }
+    if (overFlow) {
+      // realloc
+      nebrList->ipr = (idPosRadius *)realloc(
+          nebrList->ipr, particle->nAtom * maxPartPerBin * sizeof(idPosRadius));
+      nebrList->maxAtomPerBin = maxPartPerBin;
+    }
+  } while (overFlow);
+}
+void constructList(Box *box, Particle *particle, Thermo *thermo, Update *update,
+                   Variable *var) {
+  NebrList *nebrList = &update->nebrList;
+  memset(nebrList->nNebr, '\0', particle->nAtom * sizeof(int2));
+  for (int bidx = 0, cntNebr = 0; bidx < nebrList->totBin; bidx++) {
+    intVector binIdxVec;
+    int In = bidx;
+    for (int idim = 0; idim < DIM; idim++) {
+      binIdxVec[idim] = In % nebrList->nbin[idim];
+      In = In / nebrList->nbin[idim];
+    }
+    for (int ith = 0; ith < nebrList->nAtomPerBin[bidx]; ith++) {
+      idPosRadius idata = nebrList->ipr[bidx * nebrList->maxAtomPerBin + ith];
+      double iRadiusRskin = idata.radius + nebrList->rskin;
+      nebrList->nNebr[idata.id].first = cntNebr;
+      for (int adj = 0; adj < nebrList->nAdjBin; adj++) {
+        intVector binAdjVec;
+        for (int idim = 0; idim < DIM; idim++) {
+          binAdjVec[idim] =
+              (binIdxVec[idim] + nebrList->deltaAdjBin[adj][idim] +
+               nebrList->nbin[idim]) %
+              nebrList->nbin[idim];
+        }
+        int adjBidx = 0;
+        for (int idim = DIM - 1; idim >= 0; idim--) {
+          adjBidx = adjBidx * nebrList->nbin[idim] + binAdjVec[idim];
+        }
+        for (int jth = 0; jth < nebrList->nAtomPerBin[adjBidx]; jth++) {
+          idPosRadius jdata =
+              nebrList->ipr[adjBidx * nebrList->maxAtomPerBin + jth];
+          if (adjBidx == bidx && jdata.id <= idata.id) continue;
+
+          doubleVector dRij;
+          vecSub(dRij, idata.pos, jdata.pos);
+          PBC(dRij, box);
+          double rijP2;
+          vecNormP2(rijP2, dRij);
+          double RcutRskinP2 = pow(iRadiusRskin + jdata.radius, 2);
+          if (rijP2 > RcutRskinP2) continue;
+          if (cntNebr == nebrList->maxAllocNebr) {
+            nebrList->maxAllocNebr += 1024;
+            int *tmp = (int *)realloc(nebrList->list,
+                                      nebrList->maxAllocNebr * sizeof(int));
+            if (tmp == NULL) Abort("realloc nebrList failed!");
+            nebrList->list = tmp;
+          }
+          nebrList->list[cntNebr++] = jdata.id;
+        }
+      }
+      nebrList->nNebr[idata.id].second = cntNebr;
+    }
+  }
+}
+void buildNebrList(Box *box, Particle *particle, Thermo *thermo, Update *update,
+                   Variable *var) {
+  NebrList *nebrList = &update->nebrList;
+  if (nebrList->isFullStyle) {
+    nebrList->compelInit = true;
+  }
+  nebrList->isFullStyle = false;
+
+  initNebrList(box, particle, thermo, update, var);
+
+  adjustImg(box, particle, thermo, update, var);
+  if ((nebrList->nBuild % 100 == 0)) {
+    sortParticle(box, particle, thermo, update, var);
+  }
+  binParticle(box, particle, thermo, update, var);
+
+  nebrList->meanDiameterHold = particle->meanDiameter;
+  cpyUptriMat(nebrList->invBoxHold, box->invBoxH);
+  memcpy(nebrList->xyzHold, particle->pos,
+         particle->nAtom * sizeof(doubleVector));
+
+  constructList(box, particle, thermo, update, var);
+
+  nebrList->nBuild++;
+  nebrList->isValid = true;
+  nebrList->cntForce = 0;
+}
+bool isNebrListValid(Box *box, Particle *particle, Thermo *thermo,
+                     Update *update, Variable *var) {
+  NebrList *nebrList = &update->nebrList;
+  if (!nebrList->isInit) {
+    nebrList->isValid = false;
+    return false;
+  }
+  if (!nebrList->isValid) {
+    nebrList->isValid = false;
+    return false;
+  }
+
+  if (particle->isSizeFixed && box->isShapeFixed) {
+    double maxShiftP2 = 0.25 * nebrList->rskin * nebrList->rskin;
+    for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+      doubleVector dRt0;
+      vecSub(dRt0, particle->pos[iatom], nebrList->xyzHold[iatom]);
+      double rP2;
+      vecNormP2(rP2, dRt0);
+      if (rP2 >= maxShiftP2) {
+        nebrList->isValid = false;
+        return false;
+      }
+    }
+  } else if (!particle->isSizeFixed && box->isShapeFixed) {
+    for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+      doubleVector dRt0;
+      vecSub(dRt0, particle->pos[iatom], nebrList->xyzHold[iatom]);
+      double ri0;
+      vecNorm(ri0, dRt0);
+      double dsig = (particle->meanDiameter - nebrList->meanDiameterHold) *
+                    particle->diameterScale[iatom];
+
+      if (ri0 + dsig >= nebrList->rskin * 0.5) {
+        nebrList->isValid = false;
+        return false;
+      }
+    }
+  } else if (!box->isShapeFixed && particle->isSizeFixed) {
+    uptriMat trans;  // trans =  Ht * inv(H0)
+    MatMulMat(trans, box->boxH, nebrList->invBoxHold);
+    diagMat volTrans;
+    getDiag(volTrans, trans);
+
+    double sfact = 1;
+    minElement(sfact, volTrans);
+
+    invDiag(volTrans, volTrans);
+    uptriMat shapeTrans;
+    diagMulMat(shapeTrans, volTrans, trans);
+
+    for (int idim = 0; idim < DIM; idim++) {
+      for (int jdim = idim + 1; jdim < DIM; jdim++) {
+        double eps2 = pow(shapeTrans[spaceIdx(idim, jdim)], 2);
+        sfact *= sqrt(1.0 + eps2 / 2.0 - sqrt(eps2 + eps2 * eps2 / 4.0));
+      }
+    }
+
+    double rs_eff = nebrList->rskin;
+    if (sfact >= 1.0) {
+      rs_eff = sfact * rs_eff +
+               (sfact - 1.0) *
+                   (2.0 * nebrList->minDiameterScale * particle->meanDiameter);
+    } else {
+      rs_eff = sfact * rs_eff +
+               (sfact - 1.0) *
+                   (2.0 * nebrList->maxDiameterScale * particle->meanDiameter);
+    }
+    if (rs_eff <= 0) {
+      nebrList->isValid = false;
+      return false;
+    }
+    double maxShiftP2 = 0.25 * rs_eff * rs_eff;
+    for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+      doubleVector posHold;
+      cpyVec(posHold, nebrList->xyzHold[iatom]);
+      MatMulVec(posHold, trans, posHold);
+
+      doubleVector dR;
+      vecSub(dR, particle->pos[iatom], posHold);
+      double rP2;
+      vecNormP2(rP2, dR);
+
+      if (rP2 >= maxShiftP2) {
+        nebrList->isValid = false;
+        return false;
+      }
+    }
+  } else
+    Abort("Not Code!");
+  nebrList->isValid = true;
+  return true;
+}
+
+void calcForce(Box *box, Particle *particle, Thermo *thermo, Update *update,
+               Variable *var) {
+  NebrList *nebrList = &update->nebrList;
+  if (particle->isForceValid) return;
+
+  bool isListValid = isNebrListValid(box, particle, thermo, update, var);
+  if (nebrList->isFullStyle) {
+    nebrList->isValid = false;
+    isListValid = false;
+  }
+  if (!isListValid) {
+    if (nebrList->cntForce < 10) {
+      nebrList->skinSet *= 1.1;
+      nebrList->skinSet = cpuMin(nebrList->skinSet, 0.5);
+      nebrList->compelInit = true;
+    } else if (nebrList->cntForce > 20) {
+      nebrList->skinSet *= 0.9;
+      nebrList->skinSet = cpuMax(nebrList->skinSet, __minSkinSet__);
+      nebrList->compelInit = true;
+    }
+  } else {
+    if (nebrList->skinSet > __minSkinSet__ * (1 + 1E-10) &&
+        nebrList->cntForce > 20) {
+      nebrList->skinSet *= 0.9;
+      nebrList->skinSet = cpuMax(nebrList->skinSet, __minSkinSet__);
+      nebrList->compelInit = true;
+      isListValid = false;
+    }
+  }
+  if (!isListValid) {
+    buildNebrList(box, particle, thermo, update, var);
+  }
+
+  doubleVector *force = particle->force;
+  memset(force, '\0', particle->nAtom * sizeof(doubleVector));
+  thermo->Epair = thermo->virialPair = thermo->lapU = 0;
+  zerosUptriMat(thermo->ptensor);
+
+  for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+    doubleVector iforce;
+    cpyVec(iforce, force[iatom]);
+    doubleVector iPos;
+    cpyVec(iPos, particle->pos[iatom]);
+    double iRc = particle->diameterScale[iatom] * particle->meanDiameter * 0.5;
+    for (int jth = nebrList->nNebr[iatom].first;
+         jth < nebrList->nNebr[iatom].second; jth++) {
+      int jatom = nebrList->list[jth];
+      double sRc =
+          iRc + particle->diameterScale[jatom] * particle->meanDiameter * 0.5;
+      doubleVector dRij;
+      vecSub(dRij, iPos, particle->pos[jatom]);
+      PBC(dRij, box);
+
+      double rijP2;
+      vecNormP2(rijP2, dRij);
+      if (rijP2 >= sRc * sRc) continue;
+      double rij = sqrt(rijP2);
+      double rdivsig = rij / sRc;
+      double fpair = (1.0 - rdivsig) / rij / sRc;
+      vecScaleAdd(iforce, iforce, fpair, dRij);
+      vecScaleAdd(force[jatom], force[jatom], -fpair, dRij);
+
+      thermo->Epair += 0.5 * (1.0 - rdivsig) * (1.0 - rdivsig);
+      // thermo->lapU += (6.0 * rdivsig * rdivsig - 4.0 * rdivsig) / rijP2;
+
+      for (int idim = 0; idim < DIM; idim++) {
+        for (int jdim = idim; jdim < DIM; jdim++) {
+          thermo->ptensor[spaceIdx(idim, jdim)] +=
+              fpair * dRij[idim] * dRij[jdim];
+        }
+      }
+    }
+    cpyVec(force[iatom], iforce);
+  }
+
+  thermo->Epair = thermo->Epair / particle->nAtom;
+  thermo->lapU = thermo->lapU / particle->nAtom;
+
+  thermo->virialPair = 0.0;
+  thermo->pressure = 0.0;
+  for (int idim = 0; idim < DIM; idim++) {
+    thermo->virialPair += thermo->ptensor[spaceIdx(idim, idim)];
+    for (int jdim = idim; jdim < DIM; jdim++) {
+      thermo->ptensor[spaceIdx(idim, jdim)] /= box->volume;
+    }
+    thermo->pressure += thermo->ptensor[spaceIdx(idim, idim)];
+  }
+  thermo->pressure /= DIM;
+
+  thermo->Edone = thermo->Pdone = true;
+
+  particle->isForceValid = true;
+  nebrList->cntForce++;
+  nebrList->nForce++;
+}
+
+//===============================================================================
+void instant_inflate(Box *box, Particle *particle, Thermo *thermo,
+                     Update *update, Variable *var, double deltaVF) {
+  calcVolInfo(box, particle, thermo, update, var);
+  double volfrac_target = thermo->volFrac + deltaVF;
+  double sfact = pow(volfrac_target / thermo->volFrac, 1.0 / DIM);
+  particle->meanDiameter *= sfact;
+  thermo->volFrac = pow(sfact, DIM) * thermo->volFrac;
+
+  calcVolInfo(box, particle, thermo, update, var);
+
+  setBasicInfo(box, particle, thermo, update, var);
+
+  thermo->Edone = thermo->Pdone = thermo->Tdone = false;
+  particle->isForceValid = false;
+  update->nebrList.isValid = false;
+  update->nebrList.compelInit = true;
+}
+#ifdef __triBox__
+void instant_simpShearXz(Box *box, Particle *particle, Thermo *thermo,
+                         Update *update, Variable *var, double deltaGamma) {
+  adjustImg(box, particle, thermo, update, var);
+
+  for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+    particle->pos[iatom][0] += particle->pos[iatom][DIM - 1] * deltaGamma;
+  }
+
+  box->boxH[spaceIdx(0, DIM - 1)] +=
+      deltaGamma * box->boxH[spaceIdx(DIM - 1, DIM - 1)];
+
+  setBoxPara(box, particle, thermo, update, var);
+
+  thermo->Edone = thermo->Pdone = thermo->Tdone = false;
+  particle->isForceValid = false;
+  update->nebrList.isValid = false;
+  update->nebrList.compelInit = true;
+}
+void instant_deformation(Box *box, Particle *particle, Thermo *thermo,
+                         Update *update, Variable *var, uptriMat transMartix) {
+  // Rt = R0 + transMartix * R0;
+  adjustImg(box, particle, thermo, update, var);
+
+  uptriMat trans;
+  cpyUptriMat(trans, transMartix);
+  for (int idim = 0; idim < DIM; idim++) {
+    trans[spaceIdx(idim, idim)] += 1.0;
+  }
+
+  for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+    MatMulVec(particle->pos[iatom], trans, particle->pos[iatom]);
+  }
+
+  // update box
+  for (int iedge = 0; iedge < DIM; iedge++) {
+    for (int idim = 0; idim < DIM; idim++) {
+      box->boxEdge[iedge][idim] *= trans[spaceIdx(idim, idim)];
+      for (int jdim = idim + 1; jdim < DIM; jdim++) {
+        box->boxEdge[iedge][idim] +=
+            trans[spaceIdx(idim, jdim)] * box->boxEdge[iedge][jdim];
+      }
+    }
+  }
+
+  for (int idim = 0; idim < DIM; idim++) {
+    for (int jdim = idim; jdim < DIM; jdim++) {
+      box->boxH[spaceIdx(idim, jdim)] = box->boxEdge[jdim][idim];
+    }
+  }
+  setBoxPara(box, particle, thermo, update, var);
+  setBasicInfo(box, particle, thermo, update, var);
+
+  thermo->Edone = thermo->Pdone = thermo->Tdone = false;
+  particle->isForceValid = false;
+  update->nebrList.isValid = false;
+  update->nebrList.compelInit = true;
+}
+#endif
+
+void normaliseBox(Box *box, Particle *particle, Thermo *thermo, Update *update,
+                  Variable *var) {
+  double sfact = pow(box->volume, 1.0 / DIM);
+  particle->meanDiameter /= sfact;
+
+  for (int idim = 0; idim < DIM; idim++) {
+    for (int jdim = idim; jdim < DIM; jdim++) {
+      box->boxH[spaceIdx(idim, jdim)] /= sfact;
+    }
+  }
+
+  for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+    scaleVec(particle->pos[iatom], 1.0 / sfact, particle->pos[iatom]);
+  }
+
+  thermo->isInit = false;
+  thermo->Edone = thermo->Pdone = thermo->Tdone = false;
+  particle->isForceValid = false;
+  update->nebrList.isValid = false;
+  update->nebrList.compelInit = true;
+  update->nebrList.isInit = false;
+
+  setBoxPara(box, particle, thermo, update, var);
+  setBasicInfo(box, particle, thermo, update, var);
+}
+
+//===============================================================================
+void constructList_full(Box *box, Particle *particle, Thermo *thermo,
+                        Update *update, Variable *var) {
+  NebrList *nebrList = &update->nebrList;
+  memset(nebrList->nNebr, '\0', particle->nAtom * sizeof(int2));
+  for (int bidx = 0, cntNebr = 0; bidx < nebrList->totBin; bidx++) {
+    intVector binIdxVec;
+    int In = bidx;
+    for (int idim = 0; idim < DIM; idim++) {
+      binIdxVec[idim] = In % nebrList->nbin[idim];
+      In = In / nebrList->nbin[idim];
+    }
+    for (int ith = 0; ith < nebrList->nAtomPerBin[bidx]; ith++) {
+      idPosRadius idata = nebrList->ipr[bidx * nebrList->maxAtomPerBin + ith];
+      double iRadiusRskin = idata.radius + nebrList->rskin;
+      nebrList->nNebr[idata.id].first = cntNebr;
+      for (int adj = 0; adj < nebrList->nAdjBin; adj++) {
+        intVector binAdjVec;
+        for (int idim = 0; idim < DIM; idim++) {
+          binAdjVec[idim] =
+              (binIdxVec[idim] + nebrList->deltaAdjBin[adj][idim] +
+               nebrList->nbin[idim]) %
+              nebrList->nbin[idim];
+        }
+        int adjBidx = 0;
+        for (int idim = DIM - 1; idim >= 0; idim--) {
+          adjBidx = adjBidx * nebrList->nbin[idim] + binAdjVec[idim];
+        }
+        for (int jth = 0; jth < nebrList->nAtomPerBin[adjBidx]; jth++) {
+          idPosRadius jdata =
+              nebrList->ipr[adjBidx * nebrList->maxAtomPerBin + jth];
+          if (idata.id == jdata.id) continue;
+
+          doubleVector dRij;
+          vecSub(dRij, idata.pos, jdata.pos);
+          PBC(dRij, box);
+          double rijP2;
+          vecNormP2(rijP2, dRij);
+          double RcutRskinP2 = pow(iRadiusRskin + jdata.radius, 2);
+          if (rijP2 > RcutRskinP2) continue;
+          if (cntNebr == nebrList->maxAllocNebr) {
+            nebrList->maxAllocNebr += 1024;
+            int *tmp = (int *)realloc(nebrList->list,
+                                      nebrList->maxAllocNebr * sizeof(int));
+            if (tmp == NULL) Abort("realloc nebrList failed!");
+            nebrList->list = tmp;
+          }
+          nebrList->list[cntNebr++] = jdata.id;
+        }
+      }
+      nebrList->nNebr[idata.id].second = cntNebr;
+    }
+  }
+}
+void buildNebrList_full(Box *box, Particle *particle, Thermo *thermo,
+                        Update *update, Variable *var) {
+  NebrList *nebrList = &update->nebrList;
+  if (!nebrList->isFullStyle) {
+    nebrList->compelInit = true;
+  }
+  nebrList->isFullStyle = true;
+
+  initNebrList(box, particle, thermo, update, var);
+
+  adjustImg(box, particle, thermo, update, var);
+  if ((nebrList->nBuild % 100 == 0)) {
+    sortParticle(box, particle, thermo, update, var);
+  }
+  binParticle(box, particle, thermo, update, var);
+
+  nebrList->meanDiameterHold = particle->meanDiameter;
+  cpyUptriMat(nebrList->invBoxHold, box->invBoxH);
+  memcpy(nebrList->xyzHold, particle->pos,
+         particle->nAtom * sizeof(doubleVector));
+
+  constructList_full(box, particle, thermo, update, var);
+
+  nebrList->nBuild++;
+  nebrList->isValid = true;
+  nebrList->cntForce = 0;
+}
+
+//===============================================================================
+void backupSimInfo(Box *box, Particle *particle, Box *bakBox,
+                   Particle *bakParticle) {
+  if (bakParticle->nAtom != particle->nAtom) {
+    bakParticle->nAtom = particle->nAtom;
+
+    bakParticle->pos = (doubleVector *)realloc(
+        bakParticle->pos, bakParticle->nAtom * sizeof(doubleVector));
+    bakParticle->veloc = (doubleVector *)realloc(
+        bakParticle->veloc, bakParticle->nAtom * sizeof(doubleVector));
+    bakParticle->mass = (double *)realloc(bakParticle->mass,
+                                          bakParticle->nAtom * sizeof(double));
+    bakParticle->img = (intVector *)realloc(
+        bakParticle->img, bakParticle->nAtom * sizeof(intVector));
+    bakParticle->type =
+        (int *)realloc(bakParticle->type, bakParticle->nAtom * sizeof(int));
+    bakParticle->diameterScale = (double *)realloc(
+        bakParticle->diameterScale, bakParticle->nAtom * sizeof(double));
+    bakParticle->id2tag =
+        (int *)realloc(bakParticle->id2tag, bakParticle->nAtom * sizeof(int));
+    bakParticle->tag2id =
+        (int *)realloc(bakParticle->tag2id, bakParticle->nAtom * sizeof(int));
+  }
+  if (bakParticle->nAtomType != particle->nAtomType) {
+    bakParticle->nAtomType = particle->nAtomType;
+    bakParticle->massPerType = (double *)realloc(
+        bakParticle->massPerType, bakParticle->nAtomType * sizeof(double));
+  }
+
+  memcpy(bakParticle->pos, particle->pos,
+         bakParticle->nAtom * sizeof(doubleVector));
+  memcpy(bakParticle->veloc, particle->veloc,
+         bakParticle->nAtom * sizeof(doubleVector));
+  memcpy(bakParticle->mass, particle->mass,
+         bakParticle->nAtom * sizeof(double));
+  memcpy(bakParticle->img, particle->img,
+         bakParticle->nAtom * sizeof(intVector));
+  memcpy(bakParticle->type, particle->type, bakParticle->nAtom * sizeof(int));
+  memcpy(bakParticle->diameterScale, particle->diameterScale,
+         bakParticle->nAtom * sizeof(double));
+  memcpy(bakParticle->id2tag, particle->id2tag,
+         bakParticle->nAtom * sizeof(int));
+  memcpy(bakParticle->tag2id, particle->tag2id,
+         bakParticle->nAtom * sizeof(int));
+
+  memcpy(bakParticle->massPerType, particle->massPerType,
+         bakParticle->nAtomType * sizeof(double));
+
+  memcpy(&bakBox->boxH, &box->boxH, sizeof(uptriMat));
+}
+void restoreSimInfo(Box *box, Particle *particle, Thermo *thermo,
+                    Update *update, Variable *var, Box *bakBox,
+                    Particle *bakParticle) {
+  // restore data
+  backupSimInfo(bakBox, bakParticle, box, particle);
+
+  // clear
+  particle->isForceValid = false;
+
+  thermo->isInit = false;
+  thermo->Edone = false;
+  thermo->Pdone = false;
+  thermo->Tdone = false;
+
+  update->nebrList.isValid = false;
+  update->nebrList.isInit = false;
+  update->nebrList.compelInit = true;
+
+  // reinit
+  setBoxPara(box, particle, thermo, update, var);
+  setBasicInfo(box, particle, thermo, update, var);
+  adjustImg(box, particle, thermo, update, var);
+}
+void freeSimInfo(Box *bakBox, Particle *bakParticle) {
+  safeFree(bakParticle->pos);
+  safeFree(bakParticle->veloc);
+  safeFree(bakParticle->mass);
+  safeFree(bakParticle->img);
+  safeFree(bakParticle->type);
+  safeFree(bakParticle->diameterScale);
+  safeFree(bakParticle->id2tag);
+  safeFree(bakParticle->tag2id);
+}
+
+//===============================================================================
+contactInfo *initContactInfo(Box *box, Particle *particle, Thermo *thermo,
+                             Update *update, Variable *var) {
+  int whichTool = findToolkit(&thermo->toolkit, "contactInfo");
+  contactInfo *cinfo = NULL;
+  if (whichTool >= 0) {
+    cinfo = (contactInfo *)thermo->toolkit.toolkit[whichTool];
+  } else {
+    cinfo = (contactInfo *)calloc(sizeof(contactInfo), 1);
+    addToolkit(&thermo->toolkit, (void *)cinfo, "contactInfo");
+  }
+  if (particle->nAtom <= 0) Abort("No Atom!");
+
+  if (cinfo->isRattler == NULL) {
+    cinfo->isRattler = (bool *)calloc(particle->nAtom, sizeof(bool));
+  }
+  if (cinfo->nCoordNumExRattler == NULL) {
+    cinfo->nCoordNumExRattler = (int *)calloc(particle->nAtom, sizeof(int));
+  }
+  if (cinfo->nCoordNum == NULL) {
+    cinfo->nCoordNum = (int *)calloc(particle->nAtom, sizeof(int));
+  }
+  if (cinfo->forceExRattler == NULL) {
+    cinfo->forceExRattler =
+        (doubleVector *)calloc(particle->nAtom, sizeof(doubleVector));
+  }
+
+  return cinfo;
+}
+void computeCoordination(Box *box, Particle *particle, Thermo *thermo,
+                         Update *update, Variable *var) {
+  int whichTool = findToolkit(&thermo->toolkit, "contactInfo");
+  if (whichTool < 0) return;
+  contactInfo *cinfo = (contactInfo *)thermo->toolkit.toolkit[whichTool];
+  NebrList *nebrList = &update->nebrList;
+  if (!isNebrListValid(box, particle, thermo, update, var)) {
+    buildNebrList(box, particle, thermo, update, var);
+  }
+  if (cinfo->allocMem4CoordNum < nebrList->maxAllocNebr) {
+    cinfo->allocMem4CoordNum = nebrList->maxAllocNebr;
+    cinfo->isNebrContact = (bool *)realloc(
+        cinfo->isNebrContact, cinfo->allocMem4CoordNum * sizeof(bool));
+  }
+
+  memset(cinfo->isRattler, '\0', particle->nAtom * sizeof(bool));
+  memset(cinfo->nCoordNumExRattler, '\0', particle->nAtom * sizeof(int));
+  memset(cinfo->nCoordNum, '\0', particle->nAtom * sizeof(int));
+  memset(cinfo->isNebrContact, '\0', cinfo->allocMem4CoordNum * sizeof(bool));
+
+  for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+    for (int jth = nebrList->nNebr[iatom].first;
+         jth < nebrList->nNebr[iatom].second; jth++) {
+      int jatom = nebrList->list[jth];
+
+      doubleVector dRij;
+      double sRc =
+          (particle->diameterScale[iatom] + particle->diameterScale[jatom]) *
+          particle->meanDiameter * 0.5;
+      vecSub(dRij, particle->pos[iatom], particle->pos[jatom]);
+      PBC(dRij, box);
+      double rij;
+      vecNorm(rij, dRij);
+      if (rij < sRc) {
+        cinfo->isNebrContact[jth] = true;
+        cinfo->nCoordNum[jatom]++;
+        cinfo->nCoordNum[iatom]++;
+      }
+    }
+  }
+
+  int cordNumWR = 0, cordNumNR = 0, nRattler = 0;
+  bool done = true;
+  memcpy(cinfo->nCoordNumExRattler, cinfo->nCoordNum,
+         particle->nAtom * sizeof(int));
+  for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+    if (cinfo->nCoordNumExRattler[iatom] < (DIM + 1)) {
+      cinfo->isRattler[iatom] = true;
+      done = false;
+      nRattler++;
+    }
+    cordNumWR += cinfo->nCoordNum[iatom];
+    cordNumNR += cinfo->nCoordNumExRattler[iatom];
+  }
+  while (!done) {
+    done = true;
+    memset(cinfo->nCoordNumExRattler, '\0', particle->nAtom * sizeof(int));
+    for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+      if (cinfo->isRattler[iatom]) continue;
+      for (int jth = nebrList->nNebr[iatom].first;
+           jth < nebrList->nNebr[iatom].second; jth++) {
+        int jatom = nebrList->list[jth];
+        if (!cinfo->isNebrContact[jth]) continue;
+        if (!cinfo->isRattler[jatom]) {
+          cinfo->nCoordNumExRattler[iatom]++;
+          cinfo->nCoordNumExRattler[jatom]++;
+        }
+      }
+    }
+
+    cordNumNR = 0;
+    nRattler = 0;
+    for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+      if (cinfo->nCoordNumExRattler[iatom] < (DIM + 1)) {
+        if (!cinfo->isRattler[iatom]) {
+          done = false;
+        }
+        cinfo->isRattler[iatom] = true;
+        nRattler++;
+      }
+      cordNumNR += cinfo->nCoordNumExRattler[iatom];
+    }
+  }
+  cinfo->nRattler = nRattler;
+  cinfo->aveCoordNum = (double)cordNumWR / (double)particle->nAtom;
+  if (nRattler != particle->nAtom) {
+    cinfo->aveCoordNumExRattler =
+        (double)cordNumNR / (double)(particle->nAtom - nRattler);
+  } else {
+    cinfo->aveCoordNumExRattler = 0;
+  }
+
+  if (particle->nAtom == cinfo->nRattler) {
+    cinfo->meanForceExRattler = 0;
+    cinfo->lapUexRattler = 0;
+    return;
+  }
+  doubleVector *force = cinfo->forceExRattler;
+  // double lapU = 0;
+  memset(force, '\0', particle->nAtom * sizeof(doubleVector));
+  for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+    if (cinfo->isRattler[iatom]) continue;
+    doubleVector iforce;
+    cpyVec(iforce, force[iatom]);
+    doubleVector iPos;
+    cpyVec(iPos, particle->pos[iatom]);
+    double iRc = particle->diameterScale[iatom] * particle->meanDiameter * 0.5;
+    for (int jth = nebrList->nNebr[iatom].first;
+         jth < nebrList->nNebr[iatom].second; jth++) {
+      int jatom = nebrList->list[jth];
+      if (cinfo->isRattler[jatom]) continue;
+
+      doubleVector dRij;
+      double sRc =
+          iRc + particle->diameterScale[jatom] * particle->meanDiameter * 0.5;
+      vecSub(dRij, iPos, particle->pos[jatom]);
+      PBC(dRij, box);
+
+      double rijP2;
+      vecNormP2(rijP2, dRij);
+      if (rijP2 >= sRc * sRc) continue;
+      double rij = sqrt(rijP2);
+      double rdivsig = rij / sRc;
+      double fpair = (1.0 - rdivsig) / rij / sRc;
+      vecScaleAdd(iforce, iforce, fpair, dRij);
+      vecScaleAdd(force[jatom], force[jatom], -fpair, dRij);
+
+      // lapU += (6.0 * rdivsig * rdivsig - 4.0 * rdivsig) / rijP2;
+    }
+    cpyVec(force[iatom], iforce);
+  }
+
+  double sumForce = 0;
+  for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+    if (cinfo->isRattler[iatom]) continue;
+    double dotPrd;
+    vecDot(dotPrd, force[iatom], force[iatom]);
+    sumForce += sqrt(dotPrd);
+  }
+  cinfo->meanForceExRattler = sumForce / thermo->forceUnits /
+                              (double)(particle->nAtom - cinfo->nRattler);
+
+  // cinfo->lapUexRattler = lapU / (double)(particle->nAtom - cinfo->nRattler);
+}
+void finalizeContactInfo(Box *box, Particle *particle, Thermo *thermo,
+                         Update *update, Variable *var) {
+  int whichTool = findToolkit(&thermo->toolkit, "contactInfo");
+  if (whichTool < 0) return;
+  contactInfo *cinfo = (contactInfo *)thermo->toolkit.toolkit[whichTool];
+  safeFree(cinfo->isRattler);
+  safeFree(cinfo->isNebrContact);
+  safeFree(cinfo->nCoordNum);
+  safeFree(cinfo->nCoordNumExRattler);
+  safeFree(cinfo->forceExRattler);
+  delToolkit(&thermo->toolkit, "contactInfo");
+}
+
+dumpInfo *initDump(Box *box, Particle *particle, Thermo *thermo, Update *update,
+                   Variable *var) {
+  int whichVar = findVariable(var, "dump");
+  if (whichVar < 0) return (dumpInfo *)NULL;
+  dumpInfo *dinfo = (dumpInfo *)calloc(sizeof(dumpInfo), 1);
+  addToolkit(&thermo->toolkit, (void *)dinfo, "dumpInfo");
+
+  char fname[4096];
+  sprintf(fname, "%s/dump_%s.bin", var->cwd, var->sf);
+  dinfo->fdump = createReadWriteFile(fname);
+
+  // header
+  char str[32];
+  memset(str, '\0', 32 * sizeof(char));
+  sprintf(str, "Revised Binary File");
+  str[31] = '\n';
+  fwrite(str, sizeof(char), 32, dinfo->fdump);
+  dinfo->revNum = dumpFileRevNum;
+  fwrite(&dinfo->revNum, sizeof(int), 1, dinfo->fdump);
+
+  fwrite(&box->dim, sizeof(int), 1, dinfo->fdump);
+  fwrite(&particle->nAtom, sizeof(int), 1, dinfo->fdump);
+  fwrite(&particle->nAtomType, sizeof(int), 1, dinfo->fdump);
+  for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+    int idx = particle->tag2id[iatom];
+    fwrite(&particle->diameterScale[idx], sizeof(double), 1, dinfo->fdump);
+  }
+  for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+    int idx = particle->tag2id[iatom];
+    fwrite(&particle->type[idx], sizeof(int), 1, dinfo->fdump);
+  }
+  return dinfo;
+}
+void dump(Box *box, Particle *particle, Thermo *thermo, Update *update,
+          Variable *var) {
+  int whichTool = findToolkit(&thermo->toolkit, "dumpInfo");
+  if (whichTool < 0) return;
+
+  FILE *fdump = ((dumpInfo *)thermo->toolkit.toolkit[whichTool])->fdump;
+  fwrite(&particle->nAtom, sizeof(int), 1, fdump);
+  fwrite(&box->boxH, sizeof(uptriMat), 1, fdump);
+  fwrite(&particle->meanDiameter, sizeof(double), 1, fdump);
+  for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+    int idx = particle->tag2id[iatom];
+    doubleVector uxyz;
+    unwrapPos(uxyz, particle->pos[idx], particle->img[idx], box->boxH);
+
+    fwrite(&uxyz, sizeof(doubleVector), 1, fdump);
+  }
+}
+void finalizeDump(Box *box, Particle *particle, Thermo *thermo, Update *update,
+                  Variable *var) {
+  int whichTool = findToolkit(&thermo->toolkit, "dumpInfo");
+  if (whichTool < 0) return;
+  dumpInfo *dinfo = (dumpInfo *)thermo->toolkit.toolkit[whichTool];
+  safeCloseFile(dinfo->fdump);
+  delToolkit(&thermo->toolkit, "dumpInfo");
+}
+
+BinDumpFile *initMapBinFile(Box *box, Particle *particle, Thermo *thermo,
+                            Update *update, Variable *var) {
+  BinDumpFile *binFile = (BinDumpFile *)calloc(sizeof(BinDumpFile), 1);
+  addToolkit(&thermo->toolkit, (void *)binFile, "BinDumpFile");
+
+  int whichVar = findVariable(var, "read_dump");
+  if (whichVar < 0 || var->cmd[whichVar].cmdArgc != 1) {
+    Abort("--read_dump dump.bin");
+  }
+  if (binFile->dataSection != NULL) Abort("Fatal Error!");
+
+  binFile->fd = open(var->cmd[whichVar].cmdArgv[0], O_RDONLY);
+  fstat(binFile->fd, &binFile->binStat);
+  binFile->dataSection = mmap(NULL, binFile->binStat.st_size, PROT_READ,
+                              MAP_PRIVATE, binFile->fd, 0);
+  if (binFile->dataSection == MAP_FAILED) {
+    Abort("Map Binary file Failed !\n");
+  }
+
+  // header
+  char *header = (char *)binFile->dataSection;
+  void *data = binFile->dataSection;
+  int *nElement = (int *)data;
+  if (strcmp(header, "Revised Binary File") == 0) {
+    int *revNum = (int *)(header + 32);
+    binFile->revNum = revNum[0];
+    if (binFile->revNum == 0) Abort("Wrong Binary File!");
+
+    int *dim = (int *)(revNum + 1);
+    if (dim[0] != DIM) {
+      Abort("The dumpfile is for d = %d, while the code is for d = %d!", dim[0],
+            DIM);
+    }
+    nElement = (int *)(dim + 1);
+  } else {
+    if (DIM != 3) {
+      Abort("The dumpfile is for d = 3, while the code is for d = %d!", DIM);
+    }
+    binFile->revNum = 0;
+  }
+  box->dim = DIM;
+
+  binFile->headerSize =
+      sizeof(int) + sizeof(int) + nElement[0] * (sizeof(double) + sizeof(int));
+  if (binFile->revNum == 1) {
+    binFile->headerSize += 32 * sizeof(char) + 2 * sizeof(int);
+  }
+  binFile->stepSize = sizeof(int) + sizeof(uptriMat) + sizeof(double) +
+                      nElement[0] * sizeof(doubleVector);
+  binFile->nStep =
+      (binFile->binStat.st_size - binFile->headerSize) / binFile->stepSize;
+  // read first step
+  {
+    void *data = (void *)(binFile->dataSection);
+    if (binFile->revNum == 1) {
+      data = data + 32 * sizeof(char) + 2 * sizeof(int);
+    }
+
+    particle->nAtom = *((int *)data);
+    data = (void *)((char *)data + sizeof(int));
+    particle->nAtomType = *((int *)data);
+    data = (void *)((char *)data + sizeof(int));
+
+    if (particle->pos == NULL) {
+      particle->pos =
+          (doubleVector *)calloc(particle->nAtom, sizeof(doubleVector));
+      particle->veloc =
+          (doubleVector *)calloc(particle->nAtom, sizeof(doubleVector));
+      particle->force =
+          (doubleVector *)calloc(particle->nAtom, sizeof(doubleVector));
+      particle->mass = (double *)calloc(particle->nAtom, sizeof(double));
+      particle->img = (intVector *)calloc(particle->nAtom, sizeof(intVector));
+      particle->type = (int *)calloc(particle->nAtom, sizeof(int));
+      particle->diameterScale =
+          (double *)calloc(particle->nAtom, sizeof(double));
+      particle->id2tag = (int *)calloc(particle->nAtom, sizeof(int));
+      particle->tag2id = (int *)calloc(particle->nAtom, sizeof(int));
+      particle->massPerType =
+          (double *)calloc(particle->nAtomType, sizeof(double));
+      for (int itype = 0; itype < particle->nAtomType; itype++)
+        particle->massPerType[itype] = 1.0;
+    }
+
+    memcpy(particle->diameterScale, data, particle->nAtom * sizeof(double));
+    data = (void *)((char *)data + sizeof(double) * particle->nAtom);
+    memcpy(particle->type, data, particle->nAtom * sizeof(int));
+    for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+      particle->mass[iatom] = particle->massPerType[particle->type[iatom]];
+    }
+    for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+      particle->id2tag[iatom] = iatom;
+      particle->tag2id[iatom] = iatom;
+    }
+
+    data = ((char *)binFile->dataSection + binFile->headerSize + sizeof(int));
+
+    if (binFile->revNum == 0) {
+      double *tmp = (double *)data;
+      box->boxH[spaceIdx(0, 0)] = tmp[0];
+      box->boxH[spaceIdx(1, 1)] = tmp[1];
+      box->boxH[spaceIdx(2, 2)] = tmp[2];
+      box->boxH[spaceIdx(1, 2)] = tmp[3];
+      box->boxH[spaceIdx(0, 2)] = tmp[4];
+      box->boxH[spaceIdx(0, 1)] = tmp[5];
+      data = ((char *)data + 6 * sizeof(double));
+    } else {
+      memcpy(box->boxH, data, sizeof(uptriMat));
+      data = ((char *)data + sizeof(uptriMat));
+    }
+
+    particle->meanDiameter = *((double *)data);
+    data = ((char *)data + sizeof(double));
+
+    memcpy(particle->pos, data, particle->nAtom * sizeof(doubleVector));
+
+    memset(particle->veloc, '\0', particle->nAtom * sizeof(doubleVector));
+    memset(particle->force, '\0', particle->nAtom * sizeof(doubleVector));
+    memset(particle->img, '\0', particle->nAtom * sizeof(intVector));
+
+    box->isShapeFixed = true;
+    particle->isSizeFixed = true;
+    particle->isForceValid = false;
+    thermo->Edone = thermo->Pdone = thermo->Tdone = false;
+    thermo->isInit = false;
+    update->nebrList.isFullStyle = false;
+    update->nebrList.isInit = false;
+    update->nebrList.isValid = false;
+    update->nebrList.compelInit = true;
+    update->nebrList.nForce = 0;
+    update->nebrList.cntForce = 0;
+    update->nebrList.doSort = true;
+    update->nebrList.skinSet = __minSkinSet__;
+
+    setBoxPara(box, particle, thermo, update, var);
+    setBasicInfo(box, particle, thermo, update, var);
+    adjustImg(box, particle, thermo, update, var);
+  }
+
+  return binFile;
+}
+void finalizeMapBinFile(Box *box, Particle *particle, Thermo *thermo,
+                        Update *update, Variable *var) {
+  int whichTool = findToolkit(&thermo->toolkit, "BinDumpFile");
+  if (whichTool < 0) return;
+  BinDumpFile *binFile = (BinDumpFile *)thermo->toolkit.toolkit[whichTool];
+  munmap(binFile->dataSection, binFile->binStat.st_size);
+  close(binFile->fd);
+  binFile->fd = -1;
+  binFile->dataSection = NULL;
+  delToolkit(&thermo->toolkit, "BinDumpFile");
+}
+void getBinDumpData(Box *box, Particle *particle, Thermo *thermo,
+                    Update *update, Variable *var, int whichStep) {
+  int whichTool = findToolkit(&thermo->toolkit, "BinDumpFile");
+  if (whichTool < 0) return;
+  BinDumpFile *binFile = (BinDumpFile *)thermo->toolkit.toolkit[whichTool];
+  if (whichStep >= binFile->nStep || whichStep < 0) {
+    Abort("Wrong Step!");
+  }
+
+  {
+    void *data = (void *)(binFile->dataSection);
+    if (binFile->revNum == 1) {
+      data = data + 32 * sizeof(char) + 2 * sizeof(int);
+    }
+    particle->nAtom = *((int *)data);
+    data = (void *)((char *)data + sizeof(int));
+    particle->nAtomType = *((int *)data);
+    data = (void *)((char *)data + sizeof(int));
+
+    if (particle->pos == NULL) {
+      particle->pos =
+          (doubleVector *)calloc(particle->nAtom, sizeof(doubleVector));
+      particle->veloc =
+          (doubleVector *)calloc(particle->nAtom, sizeof(doubleVector));
+      particle->force =
+          (doubleVector *)calloc(particle->nAtom, sizeof(doubleVector));
+      particle->mass = (double *)calloc(particle->nAtom, sizeof(double));
+      particle->img = (intVector *)calloc(particle->nAtom, sizeof(intVector));
+      particle->type = (int *)calloc(particle->nAtom, sizeof(int));
+      particle->diameterScale =
+          (double *)calloc(particle->nAtom, sizeof(double));
+      particle->id2tag = (int *)calloc(particle->nAtom, sizeof(int));
+      particle->tag2id = (int *)calloc(particle->nAtom, sizeof(int));
+      particle->massPerType =
+          (double *)calloc(particle->nAtomType, sizeof(double));
+      for (int itype = 0; itype < particle->nAtomType; itype++)
+        particle->massPerType[itype] = 1.0;
+    }
+
+    memcpy(particle->diameterScale, data, particle->nAtom * sizeof(double));
+    data = (void *)((char *)data + sizeof(double) * particle->nAtom);
+    memcpy(particle->type, data, particle->nAtom * sizeof(int));
+    for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+      particle->mass[iatom] = particle->massPerType[particle->type[iatom]];
+    }
+    for (int iatom = 0; iatom < particle->nAtom; iatom++) {
+      particle->id2tag[iatom] = iatom;
+      particle->tag2id[iatom] = iatom;
+    }
+
+    data = ((char *)binFile->dataSection + binFile->headerSize +
+            whichStep * binFile->stepSize + sizeof(int));
+
+    if (binFile->revNum == 0) {
+      double *tmp = (double *)data;
+      box->boxH[spaceIdx(0, 0)] = tmp[0];
+      box->boxH[spaceIdx(1, 1)] = tmp[1];
+      box->boxH[spaceIdx(2, 2)] = tmp[2];
+      box->boxH[spaceIdx(1, 2)] = tmp[3];
+      box->boxH[spaceIdx(0, 2)] = tmp[4];
+      box->boxH[spaceIdx(0, 1)] = tmp[5];
+      data = ((char *)data + 6 * sizeof(double));
+    } else {
+      memcpy(box->boxH, data, sizeof(uptriMat));
+      data = ((char *)data + sizeof(uptriMat));
+    }
+
+    particle->meanDiameter = *((double *)data);
+    data = ((char *)data + sizeof(double));
+
+    memcpy(particle->pos, data, particle->nAtom * sizeof(doubleVector));
+
+    memset(particle->veloc, '\0', particle->nAtom * sizeof(doubleVector));
+    memset(particle->force, '\0', particle->nAtom * sizeof(doubleVector));
+    memset(particle->img, '\0', particle->nAtom * sizeof(intVector));
+  }
+
+  box->isShapeFixed = true;
+  particle->isSizeFixed = true;
+  particle->isForceValid = false;
+  thermo->Edone = thermo->Pdone = thermo->Tdone = false;
+  thermo->isInit = false;
+  update->nebrList.isFullStyle = false;
+  update->nebrList.isInit = false;
+  update->nebrList.isValid = false;
+  update->nebrList.compelInit = true;
+  update->nebrList.nForce = 0;
+  update->nebrList.cntForce = 0;
+  update->nebrList.doSort = true;
+  update->nebrList.skinSet = __minSkinSet__;
+
+  setBoxPara(box, particle, thermo, update, var);
+  setBasicInfo(box, particle, thermo, update, var);
+  adjustImg(box, particle, thermo, update, var);
+}
+#endif
 
 #endif
