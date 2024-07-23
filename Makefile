@@ -56,15 +56,21 @@ ifdef MKLROOT
 	BLAS_Path = -DMkl
 	BLAS_LIB = -lmkl_intel_lp64 -lmkl_core -lmkl_intel_thread -liomp5 -lpthread -lm
 else
-	BLAS_INSTALL = ${HOME}/SoftWare/
-	BLAS_Path = -DOpenblas -I $(BLAS_INSTALL)/inclue
-	BLAS_LIB = -L $(BLAS_INSTALL)/lib -lopenblas -lm
+	BLAS_INSTALL = 
+#${HOME}/SoftWare/
+	BLAS_Path = 
+#-DOpenblas -I $(BLAS_INSTALL)/inclue
+	BLAS_LIB = 
+#-L $(BLAS_INSTALL)/lib -lopenblas -lm
 endif
 
 #SparseQR
-SPQR_INSTALL = ${HOME}/SoftWare/
-SPQR_Path = -DSpqr -I $(SPQR_INSTALL)/include/suitesparse/
-SPQR_LIB = -L $(SPQR_INSTALL)/lib64/ -lcholmod -lcamd -lccolamd -lspqr -lsuitesparseconfig -lamd -lcolamd
+SPQR_INSTALL = 
+#${HOME}/SoftWare/
+SPQR_Path = 
+#-DSpqr -I $(SPQR_INSTALL)/include/suitesparse/
+SPQR_LIB = 
+#-L $(SPQR_INSTALL)/lib64/ -lcholmod -lcamd -lccolamd -lspqr -lsuitesparseconfig -lamd -lcolamd
 
 #voro++
 VORO_INSTALL= 
